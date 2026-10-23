@@ -1,0 +1,26 @@
+{
+  "title": "MC7021 Owner-reviewed Single Light",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Approve one reviewed ordinary light",
+        "description": "Review and trust the private driver.py before continuing. It executes with full Python permissions in HA. Static checks do not prove safety or protocol correctness. This enables only the known bound host and one ordinary light: independent readback and explicitly requested commands. No discovery or manufacturer configuration changes. Independent readback is required after every connection.\n\nComplete light identifier: {identifier}. Driver SHA-256: {driver_sha256}.",
+        "data": {
+          "host": "Reviewed host IP bound to this package",
+          "name": "Name of this one light",
+          "driver_approved": "I have reviewed and trust this driver code",
+          "enable_single_light_control": "I am on site and authorize readback and commands for this one light"
+        }
+      }
+    },
+    "error": {
+      "host_mismatch": "The IP must match the reviewed private package.",
+      "invalid_name": "Enter a single-light name between 1 and 64 characters.",
+      "approval_required": "Explicit driver trust and on-site single-light authorization are required."
+    },
+    "abort": {
+      "invalid_private_package": "Private binding or driver is missing, changed, a placeholder, or invalid. Recheck and regenerate on the Mac.",
+      "already_configured": "This light is already configured."
+    }
+  }
+}

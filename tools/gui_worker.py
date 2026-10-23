@@ -227,6 +227,22 @@ def make_parser():
     handoff = modes.add_parser('ha-handoff')
     handoff.add_argument('--review-file', required=True, type=Path)
     handoff.add_argument('--host-ip')
+    wizard_create = modes.add_parser('ha-wizard-create')
+    wizard_create.add_argument('--review-file', required=True, type=Path)
+    wizard_create.add_argument('--host-ip')
+    modes.add_parser('ha-wizard-demo')
+    for action in ('load', 'starter', 'adapter', 'driver', 'bundle', 'install', 'diagnostics', 'acceptance'):
+        wizard = modes.add_parser('ha-wizard-' + action)
+        wizard.add_argument('--wizard-file', required=True, type=Path)
+        if action == 'adapter':
+            wizard.add_argument('--manifest-file', required=True, type=Path)
+            wizard.add_argument('--driver-file', required=True, type=Path)
+        if action == 'driver':
+            wizard.add_argument('--driver-file', required=True, type=Path)
+        if action in ('install', 'acceptance', 'driver'):
+            wizard.add_argument('--form-file', required=True, type=Path)
+        if action == 'diagnostics':
+            wizard.add_argument('--diagnostics-file', required=True, type=Path)
     review_save = modes.add_parser('review-save')
     review_save.add_argument('--report-dir', required=True, type=Path)
     review_save.add_argument('--session-dir', required=True, type=Path)
@@ -278,7 +294,7 @@ def _unique_json_object(pairs):
     return value
 
 
-def load_review_form(path, data_root):
+def load_review_form(path, data_root, fields=REVIEW_FORM_FIELDS):
     """Read a bounded local form without following a selected symlink.
 
     Forms are private evidence. They must live beneath the user-selected data
@@ -313,13 +329,51 @@ def load_review_form(path, data_root):
                           parse_constant=lambda value: (_ for _ in ()).throw(ValueError('non-finite number')))
     except (UnicodeError, ValueError, RecursionError):
         raise WorkerError('核对表单不是有效 JSON，请重新保存。')
-    if not isinstance(form, dict) or set(form) != REVIEW_FORM_FIELDS:
+    if not isinstance(form, dict) or (fields is not None and set(form) != fields):
         raise WorkerError('核对表单字段不完整或含未知字段，请重新保存。')
-    if (not isinstance(form['decisions'], dict) or not isinstance(form['notes'], dict)
+    if fields == REVIEW_FORM_FIELDS and (not isinstance(form['decisions'], dict) or not isinstance(form['notes'], dict)
             or not isinstance(form['selected_identifier'], str)
             or not isinstance(form['reviewer_label'], str)):
         raise WorkerError('核对表单字段类型无效，请重新保存。')
     return form
+
+
+def run_ha_wizard(args, protocol):
+    try:
+        from . import ha_wizard as wizard
+    except ImportError:
+        import ha_wizard as wizard
+    action = args.mode.removeprefix('ha-wizard-')
+    root = args.data_dir
+    if action == 'create':
+        expected = capture.validate_ip(args.host_ip) if args.host_ip else None
+        path, state = wizard.create(args.review_file, root, expected_host=expected)
+    elif action == 'demo':
+        path, state = wizard.create_demo(root)
+    elif action == 'load':
+        result = wizard.load(args.wizard_file, root)
+        protocol.emit('ha_wizard', wizard_file=str(args.wizard_file), **result)
+        return
+    elif action == 'starter':
+        path, state = wizard.export_starter(args.wizard_file, root)
+    elif action == 'adapter':
+        path, state = wizard.import_adapter(args.wizard_file, args.manifest_file, args.driver_file, root)
+    elif action == 'driver':
+        form = load_review_form(args.form_file, root, fields=None)
+        path, state = wizard.import_driver(args.wizard_file, args.driver_file, root, form)
+    elif action == 'bundle':
+        path, state = wizard.build_bundle(args.wizard_file, root)
+    elif action == 'install':
+        form = load_review_form(args.form_file, root, fields=None)
+        path, state = wizard.record_installation(args.wizard_file, root, form)
+    elif action == 'diagnostics':
+        path, state = wizard.import_diagnostics(args.wizard_file, args.diagnostics_file, root)
+    elif action == 'acceptance':
+        form = load_review_form(args.form_file, root, fields=None)
+        path, state = wizard.save_acceptance(args.wizard_file, root, form)
+    else:
+        raise WorkerError('未知HA向导操作。')
+    protocol.emit('ha_wizard', wizard_file=str(path), state=state, valid=True, errors=[])
 
 
 def run_review_save(args, protocol):
@@ -450,6 +504,9 @@ def run(argv=None, protocol=None, backend_factory=None):
                     ok = True
                 elif args.mode == 'analyze':
                     analyze_and_emit(protocol, args.session_dir, args.data_dir)
+                    ok = True
+                elif args.mode.startswith('ha-wizard-'):
+                    run_ha_wizard(args, protocol)
                     ok = True
                 elif args.mode == 'ha-handoff':
                     try:

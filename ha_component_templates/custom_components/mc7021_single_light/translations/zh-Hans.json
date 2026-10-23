@@ -1,0 +1,26 @@
+{
+  "title": "MC7021 单灯业主验收",
+  "config": {
+    "step": {
+      "user": {
+        "title": "明确授权这一组普通灯",
+        "description": "请先审阅并信任私有包内的 driver.py。它将以完整 Python 代码权限在 HA 执行；静态检查不证明安全或协议正确。仅对包中核对过的IP及一组普通灯启动连接、独立状态读取和按需开关。不会自动扫描或修改厂家配置。首次/重连独立读回前灯不可用。\n\n完整灯标识：{identifier}。驱动SHA-256：{driver_sha256}。",
+        "data": {
+          "host": "包内已核对的主机IP",
+          "name": "这一组灯的名称",
+          "driver_approved": "我已审阅并信任此驱动代码（不是仅检查语法）",
+          "enable_single_light_control": "我在现场并授权这一组普通灯的在线状态读取和开关测试"
+        }
+      }
+    },
+    "error": {
+      "host_mismatch": "IP必须与本私有包绑定的已核对IP一致。",
+      "invalid_name": "请填写1至64字的单灯名称。",
+      "approval_required": "须明确同意信任驱动并授权现场单灯读写，才会启动。"
+    },
+    "abort": {
+      "invalid_private_package": "私有包缺失、哈希改变、含示例驱动或绑定无效。请回Mac重新核对并生成。",
+      "already_configured": "这一组灯已添加。"
+    }
+  }
+}

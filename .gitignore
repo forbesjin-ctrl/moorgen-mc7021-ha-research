@@ -40,3 +40,6 @@ __pycache__/
 /baseline_reviews/
 /private_reviews/
 /private_ha_handoffs/
+
+/private_ha_wizards/
+/private_ha_forms/

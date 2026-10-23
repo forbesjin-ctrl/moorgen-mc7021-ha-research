@@ -111,7 +111,7 @@ class ArchiveVerificationTests(unittest.TestCase):
 class SourceAndLicenseBoundaryTests(unittest.TestCase):
     def make_source(self, root):
         allowed = ['LICENSE', 'README.md'] + ['tools/' + name for name in builder.TOOL_FILES] + [
-            'docs/' + name for name in builder.DOCUMENT_FILES]
+            'docs/' + name for name in builder.DOCUMENT_FILES] + list(builder.COMPONENT_FILES)
         for name in allowed:
             path = root / name
             path.parent.mkdir(parents=True, exist_ok=True)

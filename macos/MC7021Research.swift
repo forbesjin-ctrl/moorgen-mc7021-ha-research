@@ -38,6 +38,22 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let haStatus = NSTextField(wrappingLabelWithString: "请先完成首组逐项核对，或载入有效的已通过记录。")
     private let haSummary = NSTextView()
     private var handoffDirectory: URL?
+    private var wizardFile: URL?
+    private var wizardState: [String: Any] = [:]
+    private var haDriverEvidence: [String: NSTextField] = [:]
+    private let haStepPicker = NSPopUpButton(frame: .zero, pullsDown: false)
+    private var haStepViews: [NSView] = []
+    private let haEntityID = NSTextField(string: "")
+    private let haInstallNotes = NSTextField(string: "")
+    private let haCasePicker = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let haCaseInstruction = NSTextField(wrappingLabelWithString: "")
+    private let haDecision = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let haPhysical = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let haObserved = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let haEventID = NSTextField(string: "")
+    private let haObservationNotes = NSTextField(string: "")
+    private let haCases = ["ha_on_1", "ha_off_1", "ha_on_2", "ha_off_2", "panel_on", "panel_off", "disconnect", "reconnect"]
+    private let haCaseNames = ["HA开灯第1次", "HA关灯第1次", "HA开灯第2次", "HA关灯第2次", "面板开灯", "面板关灯", "断线不可用", "重连读回"]
     private var captureCleanupUncertain = false
     private var capturePreflightPassed = false
     private var lastCollectionFailedCount = 0
@@ -80,7 +96,7 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
            FileManager.default.fileExists(atPath: path) { dataDirectory = URL(fileURLWithPath: path, isDirectory: true) }
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1040, height: 800),
                           styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
-        window.title = "MC7021 研究工具 · v0.5.0"
+        window.title = "MC7021 研究工具 · v0.6.0"
         window.minSize = NSSize(width: 920, height: 740)
         window.delegate = self
         let content = window.contentView!
@@ -283,13 +299,145 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func makeHAPage() -> NSView {
-        haSummary.string = "首组通过后，有能力的业主可以自行继续HA适配开发与现场验证。\n\n需要分别确认：\n• 连接与认证，以及会话更新；\n• 可重复的开关命令和序号/校验；\n• 独立状态、面板同步与当前状态回读；\n• 掉线不可用、重连重新读取；\n• 一盏灯的HA完整验收。\n\n当前尚无住户实测报文或可安装的HA集成；工具不编造端口、认证、指令或可导入配置，不建立设备连接。"
-        haSummary.font = .systemFont(ofSize: 13)
-        let scroll = scrollText(haSummary); scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 190).isActive = true
-        return stack([label("HA接入阶段 · 由业主自行继续", 20, .semibold),
-            label("首组采样核对通过后，可进入单灯HA适配工作；实际控制仍需完成协议和现场验证。研究包只保存在本机，含私有标识、报文与复核说明，不发群或公开GitHub。", 13),
-            haStatus, button("生成私有HA接入研究包", #selector(exportHAHandoff)),
-            button("在Finder查看HA研究包", #selector(revealHAHandoff)), scroll])
+        let scroll = NSScrollView(); scroll.hasVerticalScroller = true
+        let document = ReviewDocumentView(); document.translatesAutoresizingMaskIntoConstraints = false; scroll.documentView = document
+        let body = stack([]); body.translatesAutoresizingMaskIntoConstraints = false; document.addSubview(body)
+        NSLayoutConstraint.activate([document.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor), body.leadingAnchor.constraint(equalTo: document.leadingAnchor, constant: 2), body.trailingAnchor.constraint(equalTo: document.trailingAnchor, constant: -12), body.topAnchor.constraint(equalTo: document.topAnchor, constant: 6), body.bottomAnchor.constraint(equalTo: document.bottomAnchor, constant: -12)])
+        func add(_ view: NSView) { body.addArrangedSubview(view); view.widthAnchor.constraint(equalTo: body.widthAnchor).isActive = true }
+        add(label("单灯 HA 接入向导 · 五步保存进度", 20, .semibold))
+        add(label("先有本户真实首组复核，再由有能力的业主提供已核对驱动。Mac只检查文件和证据，不执行导入代码、不连接家庭设备。缺少驱动时停在准备步骤。", 13))
+        let navigation = NSStackView(views: [button("新建单灯接入向导", #selector(createHAWizard)), button("载入向导进度…", #selector(loadHAWizard)), button("演示HA向导", #selector(demoHAWizard))]); navigation.spacing = 8; add(navigation)
+        haStepPicker.addItems(withTitles: ["1 · 首组和灯路", "2 · 核对适配驱动", "3 · 安装并配置HA", "4 · 单灯真实状态验收", "5 · 验收报告"])
+        haStepPicker.target = self; haStepPicker.action = #selector(changeHAStep); haStepPicker.setAccessibilityLabel("HA向导步骤"); add(haStepPicker); add(haStatus)
+        haSummary.string = "选择演示可以练习流程；正式向导需要首组真实复核记录。各步和现场观察只存本机。"; haSummary.font = .systemFont(ofSize: 12)
+        let summary = scrollText(haSummary); summary.heightAnchor.constraint(equalToConstant: 155).isActive = true; add(summary)
+        let first = stack([label("第一步：核对目标", 16, .semibold), label("确认当前MC7021、房间、普通灯及完整对象标识与首组一致。新建、载入、生成包和验收都会重新校验原件；原件改变应重新分析复核。未通过不能安装。", 13), button("保留原研究包（可选）", #selector(exportHAHandoff))])
+        let adapter = stack([label("第二步：准备并检查驱动", 16, .semibold), label("导出接口模板后，由有协议与Python经验的业主编写driver.py及清单，说明认证/会话、开关编码和独立状态依据。模板不能直接控制灯。导入只检查语法、接口和绑定，不认证代码安全或协议正确。导入代码将来在HA内具有自定义集成的执行权限，请先自行审阅。", 13), button("导出驱动接口模板", #selector(exportHAStarter))])
+        for (key, title) in [("protocol", "连接与协议依据"), ("session", "认证和当前会话依据"), ("commands", "开关命令与序号依据"), ("independent_state", "独立状态及面板回读依据")] {
+            let field = NSTextField(string: ""); field.placeholderString = title + "（填写证据引用与结论）"; field.setAccessibilityLabel(title); haDriverEvidence[key] = field; adapter.addArrangedSubview(field); field.widthAnchor.constraint(equalTo: adapter.widthAnchor).isActive = true
+        }
+        adapter.addArrangedSubview(button("选择已核对驱动并自动生成清单…", #selector(importHADriver)))
+        adapter.addArrangedSubview(button("高级：导入已有清单和驱动…", #selector(importHAAdapter)))
+        adapter.addArrangedSubview(button("在Finder查看向导文件", #selector(revealHAWizard)))
+        haEntityID.placeholderString = "HA实际创建的light实体ID，例如light.study_ceiling"; haEntityID.setAccessibilityLabel("HA灯实体ID")
+        haInstallNotes.placeholderString = "记录HA版本、配置结果及只启用此单灯的依据"; haInstallNotes.setAccessibilityLabel("HA安装记录")
+        let install = stack([label("第三步：安装并配置HA", 16, .semibold), button("生成单灯HA安装包", #selector(buildHABundle)), button("在Finder查看安装包", #selector(revealHAWizard)), label("完整解压安装包，通过已有文件管理工具，把custom_components/mc7021_single_light复制到HA配置目录。先备份HA，已有同名集成时停止，勿直接覆盖。然后在HA界面重启，在设置→设备与服务→添加集成中搜索“MC7021 单灯业主验收”。核对绑定主机和对象，明确确认驱动及现场单灯测试后，HA才加载驱动。无需猜测未知端口或寄存器。", 13), haEntityID, haInstallNotes, button("记录已在HA安装并配置", #selector(recordHAInstallation)), label("Mac不替你登录、安装、启用或更改HA。安装成功是人工声明；后续须导回同一安装包的HA诊断和实际亮灭观察。", 12)])
+        haCasePicker.addItems(withTitles: haCaseNames); haCasePicker.target = self; haCasePicker.action = #selector(changeHACase); haCasePicker.setAccessibilityLabel("单灯验收步骤")
+        haDecision.addItems(withTitles: ["待验证", "人工观察通过", "需重测"]); haDecision.setAccessibilityLabel("本步人工结论")
+        haPhysical.addItems(withTitles: ["实际亮灭未知", "亲眼看到亮", "亲眼看到灭"]); haPhysical.setAccessibilityLabel("物理灯观察")
+        haObserved.addItems(withTitles: ["HA显示未知", "HA显示开", "HA显示关", "HA显示不可用"]); haObserved.setAccessibilityLabel("HA状态观察")
+        haEventID.placeholderString = "对应诊断状态事件ID，十进制整数"; haEventID.setAccessibilityLabel("状态证据事件ID")
+        haObservationNotes.placeholderString = "实际亮灭、HA显示及事件依据；ACK不算状态"; haObservationNotes.setAccessibilityLabel("单灯现场观察依据")
+        let acceptance = stack([label("第四步：一组普通灯，八项验收", 16, .semibold), label("在HA设备页验收步骤选择器中选同一步，点“开始记录所选验收步骤”后再操作。四次HA开关后做面板操作，最后用集成断开/重连按钮验证不可用和回读，不断电、不改路由或厂家配置。每步看实体灯及HA，最后下载此集成诊断JSON并导入。", 13), haCasePicker, haCaseInstruction, haDecision, haPhysical, haObserved, haEventID, haObservationNotes, button("保存本步观察并核对", #selector(saveHAAcceptance)), button("导入HA诊断JSON并核对…", #selector(importHADiagnostics)), button("查看本机HA事件证据", #selector(showHAWizardEvidence))])
+        let report = stack([label("第五步：看结论再扩展", 16, .semibold), label("上方报告分为已确认、待验证、需重测。机器只核对日志和绑定一致性；物理亮灭来自业主逐项观察。缺少步骤、窗口不符、只有ACK、旧会话或重连无当前读回，都不能通过。未完成时补测这一组；通过也仅适用于本户这组普通灯。", 13), button("查看完整向导及验收证据", #selector(showHAWizardEvidence)), button("在Finder查看私有验收报告", #selector(revealHAWizard))])
+        haStepViews = [first, adapter, install, acceptance, report]; for view in haStepViews { add(view) }
+        changeHAStep(); changeHACase(); return scroll
+    }
+
+    @objc private func changeHAStep() { for (index, view) in haStepViews.enumerated() { view.isHidden = index != haStepPicker.indexOfSelectedItem } }
+    private func selectedHAWizard() -> URL? {
+        guard !busy, let file = wizardFile else { alert("先新建或载入向导", "可以先演示，正式接入需要有效首组复核及自行核对的驱动。"); return nil }; return file
+    }
+    @objc private func createHAWizard() {
+        guard !busy, activeReviewPassed, let review = activeReviewFile else { alert("先完成首组复核", "没有有效真实首组记录时，可先演示HA向导。"); return }
+        var arguments = ["--review-file", review.path]; let ip = host.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !ip.isEmpty { arguments += ["--host-ip", ip] }; start(mode: "ha-wizard-create", arguments: arguments)
+    }
+    @objc private func demoHAWizard() { guard !busy else { return }; start(mode: "ha-wizard-demo", arguments: []) }
+    @objc private func loadHAWizard() {
+        guard !busy, let root = requireDataDirectory() else { return }
+        let panel = NSOpenPanel(); panel.title = "选择本机state.json向导进度"; panel.allowedFileTypes = ["json"]; panel.allowsMultipleSelection = false; panel.directoryURL = root.appendingPathComponent("private_ha_wizards")
+        if panel.runModal() == .OK, let url = panel.url { start(mode: "ha-wizard-load", arguments: ["--wizard-file", url.path]) }
+    }
+    @objc private func exportHAStarter() { if let file = selectedHAWizard() { start(mode: "ha-wizard-starter", arguments: ["--wizard-file", file.path]) } }
+    @objc private func buildHABundle() { if let file = selectedHAWizard() { start(mode: "ha-wizard-bundle", arguments: ["--wizard-file", file.path]) } }
+    @objc private func importHADriver() {
+        guard let file = selectedHAWizard() else { return }
+        let evidence = haDriverEvidence.mapValues { $0.stringValue }
+        guard evidence.values.allSatisfy({ !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else { alert("先填写四项依据", "接口检查不能替代本户协议核对。请填写连接、会话、命令和独立状态依据。"); return }
+        let panel = NSOpenPanel(); panel.title = "选择自行编写并审阅的driver.py（不在Mac执行）"; panel.allowedFileTypes = ["py"]; panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let path = panel.url else { return }
+        do { let form = try writeHAForm(evidence); start(mode: "ha-wizard-driver", arguments: ["--wizard-file", file.path, "--driver-file", path.path, "--form-file", form.path]) }
+        catch { alert("驱动依据未保存", "请检查本机数据文件夹。") }
+    }
+    @objc private func importHAAdapter() {
+        guard let file = selectedHAWizard() else { return }
+        let manifest = NSOpenPanel(); manifest.title = "选择已填写的驱动清单JSON"; manifest.allowedFileTypes = ["json"]; manifest.allowsMultipleSelection = false
+        guard manifest.runModal() == .OK, let m = manifest.url else { return }
+        let driver = NSOpenPanel(); driver.title = "选择已自行审阅的driver.py（Mac不会执行）"; driver.allowedFileTypes = ["py"]; driver.allowsMultipleSelection = false
+        guard driver.runModal() == .OK, let d = driver.url else { return }
+        start(mode: "ha-wizard-adapter", arguments: ["--wizard-file", file.path, "--manifest-file", m.path, "--driver-file", d.path])
+    }
+    private func writeHAForm(_ object: [String: Any]) throws -> URL {
+        guard let root = requireDataDirectory() else { throw CocoaError(.fileWriteNoPermission) }
+        let folder = root.appendingPathComponent("private_ha_forms", isDirectory: true)
+        if (try? folder.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) == true { throw CocoaError(.fileWriteNoPermission) }
+        var isDirectory: ObjCBool = false
+        if FileManager.default.fileExists(atPath: folder.path, isDirectory: &isDirectory) {
+            guard isDirectory.boolValue else { throw CocoaError(.fileWriteFileExists) }
+        } else { try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700]) }
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: folder.path)
+        let path = folder.appendingPathComponent(UUID().uuidString + ".json")
+        try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys]).write(to: path, options: [.withoutOverwriting])
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path.path); return path
+    }
+    @objc private func recordHAInstallation() {
+        guard let file = selectedHAWizard() else { return }
+        do { let form = try writeHAForm(["entity_id": haEntityID.stringValue, "confirmed": true, "notes": haInstallNotes.stringValue]); start(mode: "ha-wizard-install", arguments: ["--wizard-file", file.path, "--form-file", form.path]) }
+        catch { alert("安装记录未保存", "请选择有效数据文件夹，并填写实体ID和安装依据。") }
+    }
+    @objc private func importHADiagnostics() {
+        guard let file = selectedHAWizard() else { return }
+        let panel = NSOpenPanel(); panel.title = "选择该单灯集成下载的诊断JSON"; panel.allowedFileTypes = ["json"]; panel.allowsMultipleSelection = false
+        if panel.runModal() == .OK, let url = panel.url { start(mode: "ha-wizard-diagnostics", arguments: ["--wizard-file", file.path, "--diagnostics-file", url.path]) }
+    }
+    @objc private func changeHACase() {
+        let index = max(0, haCasePicker.indexOfSelectedItem)
+        let details = ["HA选择“1 · HA开灯（第一次）”，点“开始记录所选验收步骤”，再点灯开关；等独立状态，亲眼确认亮。", "选择“2 · HA关灯（第一次）”并开始记录，再HA关灯；等独立状态，确认灭。", "选择“3 · HA开灯（第二次）”并开始记录，重复HA开灯。", "选择“4 · HA关灯（第二次）”并开始记录，重复HA关灯；ACK不算状态。", "选择“5 · 面板开灯”并开始记录，只按原面板开灯，不点HA；检查HA独立更新为开。", "选择“6 · 面板关灯”并开始记录，只按原面板关灯，不点HA；检查HA独立更新为关。", "选择“7 · 仅断开本集成，检查不可用”并开始记录，点“仅断开本单灯适配连接”；HA不可用后用面板开灯，记录实物亮。", "选择“8 · 面板开灯后，重连读回”并开始记录，点“重连本单灯适配并读回”；须新代次独立读回，HA显示与此刻实物一致。"]
+        haCaseInstruction.stringValue = details[index]
+        let row = (wizardState["observations"] as? [String: [String: Any]] ?? [:])[haCases[index]] ?? [:]
+        haDecision.selectItem(at: ["pending": 0, "pass": 1, "resample": 2][row["decision"] as? String ?? "pending"] ?? 0)
+        haPhysical.selectItem(at: ["unknown": 0, "on": 1, "off": 2][row["physical_light"] as? String ?? "unknown"] ?? 0)
+        haObserved.selectItem(at: ["unknown": 0, "on": 1, "off": 2, "unavailable": 3][row["ha_state"] as? String ?? "unknown"] ?? 0)
+        haEventID.stringValue = (row["event_id"] as? NSNumber)?.stringValue ?? ""; haObservationNotes.stringValue = row["notes"] as? String ?? ""
+    }
+    @objc private func saveHAAcceptance() {
+        guard let file = selectedHAWizard() else { return }
+        var observations = wizardState["observations"] as? [String: [String: Any]] ?? [:]
+        for key in haCases where observations[key] == nil { observations[key] = ["decision": "pending", "physical_light": "unknown", "ha_state": "unknown", "notes": "", "event_id": NSNull()] }
+        let event: Any = Int(haEventID.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)).map { $0 as Any } ?? NSNull()
+        observations[haCases[max(0, haCasePicker.indexOfSelectedItem)]] = ["decision": ["pending", "pass", "resample"][max(0, haDecision.indexOfSelectedItem)], "physical_light": ["unknown", "on", "off"][max(0, haPhysical.indexOfSelectedItem)], "ha_state": ["unknown", "on", "off", "unavailable"][max(0, haObserved.indexOfSelectedItem)], "notes": haObservationNotes.stringValue, "event_id": event]
+        do { let form = try writeHAForm(observations); start(mode: "ha-wizard-acceptance", arguments: ["--wizard-file", file.path, "--form-file", form.path]) }
+        catch { alert("观察未保存", "请检查本机数据文件夹。") }
+    }
+    @objc private func showHAWizardEvidence() {
+        guard !wizardState.isEmpty, let data = try? JSONSerialization.data(withJSONObject: wizardState, options: [.prettyPrinted, .sortedKeys]), let text = String(data: data, encoding: .utf8) else { alert("尚无向导", "先新建或载入向导。"); return }
+        evidenceWindow?.close()
+        let evidence = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 650), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        evidence.title = "私有HA向导与事件证据 · 只读"; evidence.isReleasedWhenClosed = false
+        let view = NSTextView(); view.string = text; view.isEditable = false; view.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        evidence.contentView = scrollText(view); evidenceWindow = evidence; evidence.center(); evidence.makeKeyAndOrderFront(nil)
+    }
+    @objc private func revealHAWizard() {
+        guard let file = wizardFile else { alert("尚无向导", "请新建或载入向导。"); return }; NSWorkspace.shared.activateFileViewerSelecting([file.deletingLastPathComponent()])
+    }
+    private func receiveHAWizard(_ event: [String: Any]) {
+        guard let value = event["state"] as? [String: Any] else { return }; let changed = (wizardState["wizard_id"] as? String) != (value["wizard_id"] as? String); wizardState = value
+        if changed { for field in haDriverEvidence.values { field.stringValue = "" } }
+        if let path = event["wizard_file"] as? String { wizardFile = URL(fileURLWithPath: path) }
+        let assessment = value["assessment"] as? [String: Any] ?? [:]; let simulated = value["simulation"] as? Bool ?? false; let valid = event["valid"] as? Bool ?? true
+        var lines = [simulated ? "【合成演示 · 永不作为实机验收通过】" : "【私有单灯向导 · 人工观察与日志核对】", "进度：\(["adapter": "核对适配驱动", "bundle": "生成安装包", "installation": "安装并配置HA", "acceptance": "现场验收", "passed": "本轮人工验收通过", "invalid": "来源失效"][value["stage"] as? String ?? ""] ?? "准备")"]
+        if let baseline = value["baseline"] as? [String: Any] { lines += ["主机：\(baseline["host_ip"] as? String ?? "演示")", "完整标识：\(baseline["target_identifier"] as? String ?? "待核对")"] }
+        for (key, title) in [("confirmed", "已确认"), ("pending", "待验证"), ("resample", "需重测")] { lines += ["", title + "："] + ((assessment[key] as? [String]) ?? ["请看完整证据"]) }
+        if let errors = event["errors"] as? [String], !errors.isEmpty { lines += ["", "失效原因："] + errors }
+        haSummary.string = lines.joined(separator: "\n"); haSummary.scrollToBeginningOfDocument(nil)
+        haStatus.stringValue = valid ? (simulated ? "演示可练习流程，不能安装真实驱动或通过验收。" : "进度已保存；驱动接口检查不等于代码安全或物理状态认证。") : "向导来源已失效，先重新核对原件，不能继续安装或验收。"
+        if let installation = value["installation"] as? [String: Any] { haEntityID.stringValue = installation["entity_id"] as? String ?? ""; haInstallNotes.stringValue = installation["notes"] as? String ?? "" } else { haEntityID.stringValue = ""; haInstallNotes.stringValue = "" }
+        if activeMode == "ha-wizard-create" || activeMode == "ha-wizard-demo" { haStepPicker.selectItem(at: 0) }
+        else if activeMode == "ha-wizard-driver" || activeMode == "ha-wizard-adapter" || activeMode == "ha-wizard-bundle" { haStepPicker.selectItem(at: 2) }
+        else if activeMode == "ha-wizard-install" || activeMode == "ha-wizard-diagnostics" { haStepPicker.selectItem(at: 3) }
+        else if activeMode == "ha-wizard-acceptance", assessment["passed"] as? Bool == true { haStepPicker.selectItem(at: 4) }
+        changeHAStep(); changeHACase(); tabs.selectedSegment = 5; changePage(); lastReviewMessage = haStatus.stringValue
     }
 
     @objc private func enterHAStage() {
@@ -297,7 +445,7 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             alert("先完成首组核对", "请逐项核对并保存通过结论，或载入有效的已通过记录。合成、待验证、需补采或原件变化时不能进入后续工作。"); return
         }
         tabs.selectedSegment = 5; changePage()
-        haStatus.stringValue = "已选择首组人工通过记录。生成研究包时会再次核对原件与当前主机；不会自动连接、安装或发送控制命令。"
+        haStatus.stringValue = "已选择首组人工通过记录。请点“新建单灯接入向导”，按五步完成适配、安装和验收；不会自动连接或发送控制命令。"
     }
 
     @objc private func exportHAHandoff() {
@@ -465,7 +613,7 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             resetReviewForm()
         }
         reviewGate.stringValue = message; lastReviewMessage = message; status.stringValue = message
-        haStatus.stringValue = passed ? "首组人工通过记录已选择，可生成本机HA接入研究包并自行继续适配。" : "首组尚未通过，HA接入后续工作保持锁定。"
+        haStatus.stringValue = passed ? "首组人工通过记录已选择，可新建图形向导继续单灯适配、安装与验收。" : "首组尚未通过，HA接入后续工作保持锁定。"
         reviewSummary.string = message + "\n\n" + reviewSummary.string
         reviewSummary.scrollToBeginningOfDocument(nil)
         tabs.selectedSegment = 4; changePage()
@@ -492,6 +640,7 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             reviewGate.stringValue = "数据目录已更换。请采首组，或载入本目录中已经完成的核对记录。"
             reviewReport = nil; reviewReportDirectory = nil; reviewSessionDirectory = nil
             reviewSummary.string = "请先采样或分析一轮，再逐项核对。"; resetReviewForm()
+            wizardFile = nil; wizardState = [:]; for field in haDriverEvidence.values { field.stringValue = "" }; haEntityID.stringValue = ""; haInstallNotes.stringValue = ""; changeHACase()
             handoffDirectory = nil; haStatus.stringValue = "数据目录已更换，请载入本目录中有效的首组核对记录。"
             reviewCandidate.removeAllItems(); reviewCandidate.addItem(withTitle: "等待当前目录的重复开关候选")
             for key in reviewIDs { reviewEvidence[key]?.stringValue = "等待当前数据目录的本轮检查。" }
@@ -693,6 +842,8 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             receiveReview(event["validation"] as? [String: Any] ?? [:], path: event["record_path"] as? String)
         case "review_validation":
             receiveReview(event, path: event["review_file"] as? String)
+        case "ha_wizard":
+            receiveHAWizard(event)
         case "ha_handoff":
             if let path = event["directory"] as? String {
                 handoffDirectory = URL(fileURLWithPath: path, isDirectory: true)

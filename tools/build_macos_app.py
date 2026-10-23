@@ -46,11 +46,12 @@ for _artifact in list(RUNTIMES.values()) + [LICENSE_ARCHIVE]:
 TOOL_FILES = (
     'gui_worker.py', 'gui_capture_backend.py', 'capture_mc7021_light.py', 'analyze_capture.py',
     'demo_sample.py', 'offline_shcp.py', 'pcap_reader.py', 'report_view.py',
-    'light_state_model.py', 'research_tool.py', 'collection_report.py', 'baseline_review.py', 'ha_handoff.py',
+    'light_state_model.py', 'research_tool.py', 'collection_report.py', 'baseline_review.py', 'ha_handoff.py', 'ha_wizard.py',
 )
 DOCUMENT_FILES = (
-    'MAC_APP_BUILD.md', 'MAC_GUI.md', 'CAPTURE.md', 'AFTER_CAPTURE.md', 'PRIVATE_SAMPLES.md', 'MULTI_DEVICE.md', 'FIRST_LIGHT_REVIEW.md',
+    'MAC_APP_BUILD.md', 'MAC_GUI.md', 'CAPTURE.md', 'AFTER_CAPTURE.md', 'PRIVATE_SAMPLES.md', 'MULTI_DEVICE.md', 'FIRST_LIGHT_REVIEW.md', 'HA_WIZARD.md',
 )
+COMPONENT_FILES = ('ha_component_templates/README.md', 'ha_component_templates/custom_components/mc7021_single_light/__init__.py', 'ha_component_templates/custom_components/mc7021_single_light/manifest.json', 'ha_component_templates/custom_components/mc7021_single_light/config_flow.py', 'ha_component_templates/custom_components/mc7021_single_light/const.py', 'ha_component_templates/custom_components/mc7021_single_light/contract.py', 'ha_component_templates/custom_components/mc7021_single_light/bridge.py', 'ha_component_templates/custom_components/mc7021_single_light/light.py', 'ha_component_templates/custom_components/mc7021_single_light/select.py', 'ha_component_templates/custom_components/mc7021_single_light/button.py', 'ha_component_templates/custom_components/mc7021_single_light/diagnostics.py', 'ha_component_templates/custom_components/mc7021_single_light/strings.json', 'ha_component_templates/custom_components/mc7021_single_light/translations/en.json', 'ha_component_templates/custom_components/mc7021_single_light/translations/zh-Hans.json', 'ha_component_templates/custom_components/mc7021_single_light/driver.py')
 MAX_RUNTIME_BYTES = 250 * 1024 * 1024
 MACHO_MAGICS = (b'\xcf\xfa\xed\xfe', b'\xce\xfa\xed\xfe', b'\xca\xfe\xba\xbe',
                 b'\xbe\xba\xfe\xca', b'\xca\xfe\xba\xbf', b'\xbf\xba\xfe\xca')
@@ -165,7 +166,7 @@ def copy_owned_sources(project_root, resources):
     result = {}
     project_root = project_root.resolve()
     for relative in ['LICENSE', 'README.md'] + ['tools/' + name for name in TOOL_FILES] + [
-            'docs/' + name for name in DOCUMENT_FILES]:
+            'docs/' + name for name in DOCUMENT_FILES] + list(COMPONENT_FILES):
         source = project_root / relative
         ancestors = source.relative_to(project_root).parts[:-1]
         linked_parent = any(project_root.joinpath(*ancestors[:index]).is_symlink()
