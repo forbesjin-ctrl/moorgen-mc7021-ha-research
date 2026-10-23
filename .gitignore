@@ -30,3 +30,9 @@ session.json.tmp
 __pycache__/
 *.py[cod]
 .DS_Store
+*.app/
+*.dSYM/
+*.dmg
+*.tar.gz
+*.tar.zst
+/macos/capture-helper

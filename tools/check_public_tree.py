@@ -22,6 +22,10 @@ PUBLIC_FILES = frozenset({
     'tools/demo_sample.py', 'tools/research_tool.py', 'tools/light_state_model.py',
     'tests/test_analyze_capture.py', 'tests/test_pcap_reader.py', 'tests/test_report_view.py',
     'tests/test_research_tool.py', 'tests/test_light_state_model.py',
+    'macos/MC7021Research.swift', 'macos/capture_helper.c',
+    'tools/gui_worker.py', 'tools/gui_capture_backend.py', 'tools/build_macos_app.py',
+    'tests/test_gui_worker.py', 'tests/test_gui_capture_backend.py', 'tests/test_build_macos_app.py',
+    'docs/MAC_GUI.md', 'docs/MAC_APP_BUILD.md',
     '.github/ISSUE_TEMPLATE/compatibility.yml', '.github/ISSUE_TEMPLATE/bug_report.md',
     '.github/ISSUE_TEMPLATE/config.yml', '.github/workflows/offline.yml',
 })
