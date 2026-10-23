@@ -12,12 +12,16 @@ import re
 import subprocess
 
 PUBLIC_FILES = frozenset({
-    'README.md', 'LICENSE', 'CONTRIBUTING.md', '.gitignore', '开始单灯采样.command',
+    'README.md', 'LICENSE', 'CONTRIBUTING.md', '.gitignore', '开始单灯采样.command', '打开研究工具.command',
     'docs/CAPTURE.md', 'docs/PRIVATE_SAMPLES.md', 'docs/PROTOCOL_CANDIDATE.md',
-    'docs/COMPATIBILITY.md', 'docs/ROADMAP.md',
+    'docs/COMPATIBILITY.md', 'docs/ROADMAP.md', 'docs/AFTER_CAPTURE.md',
     'tools/capture_mc7021_light.py', 'tools/offline_shcp.py', 'tools/check_public_tree.py',
     'tests/test_capture_mc7021_light.py', 'tests/test_offline_shcp.py',
     'tests/test_public_tree.py', 'tests/test_community_source.py',
+    'tools/analyze_capture.py', 'tools/pcap_reader.py', 'tools/report_view.py',
+    'tools/demo_sample.py', 'tools/research_tool.py', 'tools/light_state_model.py',
+    'tests/test_analyze_capture.py', 'tests/test_pcap_reader.py', 'tests/test_report_view.py',
+    'tests/test_research_tool.py', 'tests/test_light_state_model.py',
     '.github/ISSUE_TEMPLATE/compatibility.yml', '.github/ISSUE_TEMPLATE/bug_report.md',
     '.github/ISSUE_TEMPLATE/config.yml', '.github/workflows/offline.yml',
 })

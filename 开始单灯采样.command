@@ -23,7 +23,7 @@ if [[ ! -x /usr/bin/python3 ]]; then
   read -r 'capture_close?按回车关闭。'
   exit 1
 fi
-/usr/bin/python3 "$capture_launcher_dir/tools/capture_mc7021_light.py" "$@"
+/usr/bin/python3 "$capture_launcher_dir/tools/capture_mc7021_light.py" --analyze-after "$@"
 capture_exit=$?
 if [[ -t 0 ]]; then
   read -r 'capture_close?按回车关闭此窗口；结果已保存在上方显示的目录。'

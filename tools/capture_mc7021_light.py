@@ -24,7 +24,7 @@ import threading
 import time
 import uuid
 
-VERSION = '0.1.0-community'
+VERSION = '0.2.0-community'
 OUTPUTS = Path(__file__).resolve().parents[1]
 SHANGHAI = timezone(timedelta(hours=8), 'Asia/Shanghai')
 RVICTL = '/Library/Apple/usr/bin/rvictl'
@@ -695,6 +695,7 @@ def read_value(prompt, validator):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--demo', action='store_true', help='offline rehearsal, no tools or network; no PCAP produced')
+    parser.add_argument('--analyze-after', action='store_true', help='write a private offline report after cleanup')
     parser.add_argument('--peer-owner', action='store_true',
                         help='label this as another owner household; never project-home evidence')
     args = parser.parse_args(argv)
@@ -723,6 +724,18 @@ def main(argv=None):
     finally:
         for number, handler in previous.items():
             signal.signal(number, handler)
+    if args.analyze_after:
+        try:
+            try:
+                from .analyze_capture import analyze_session
+                from .research_tool import show_report
+            except ImportError:
+                from analyze_capture import analyze_session
+                from research_tool import show_report
+            destination, report = analyze_session(journal.directory)
+            show_report(destination, report, open_browser=not args.demo)
+        except (OSError, ValueError) as error:
+            print('采样文件已保留，后续离线分析未完成：{}'.format(error), flush=True)
     return 0 if result['status'] in ('completed', 'completed_with_skips', 'completed_no_packets',
                                     'demo_completed', 'demo_completed_with_skips', 'interrupted') else 1
 
