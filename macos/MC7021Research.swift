@@ -96,7 +96,7 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
            FileManager.default.fileExists(atPath: path) { dataDirectory = URL(fileURLWithPath: path, isDirectory: true) }
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1040, height: 800),
                           styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
-        window.title = "MC7021 研究工具 · v0.6.0"
+        window.title = "MC7021 研究工具 · v0.6.1"
         window.minSize = NSSize(width: 920, height: 740)
         window.delegate = self
         let content = window.contentView!
@@ -426,7 +426,7 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if changed { for field in haDriverEvidence.values { field.stringValue = "" } }
         if let path = event["wizard_file"] as? String { wizardFile = URL(fileURLWithPath: path) }
         let assessment = value["assessment"] as? [String: Any] ?? [:]; let simulated = value["simulation"] as? Bool ?? false; let valid = event["valid"] as? Bool ?? true
-        var lines = [simulated ? "【合成演示 · 永不作为实机验收通过】" : "【私有单灯向导 · 人工观察与日志核对】", "进度：\(["adapter": "核对适配驱动", "bundle": "生成安装包", "installation": "安装并配置HA", "acceptance": "现场验收", "passed": "本轮人工验收通过", "invalid": "来源失效"][value["stage"] as? String ?? ""] ?? "准备")"]
+        var lines = [simulated ? "【合成演示 · 永不作为实机验收通过】" : "【私有单灯向导 · 人工观察与日志核对】", "进度：\(["adapter": "核对适配驱动", "bundle": "生成安装包", "installation": "安装并配置HA", "acceptance": "现场验收", "complete": "本轮人工验收通过", "invalid": "来源失效"][value["stage"] as? String ?? ""] ?? "准备")"]
         if let baseline = value["baseline"] as? [String: Any] { lines += ["主机：\(baseline["host_ip"] as? String ?? "演示")", "完整标识：\(baseline["target_identifier"] as? String ?? "待核对")"] }
         for (key, title) in [("confirmed", "已确认"), ("pending", "待验证"), ("resample", "需重测")] { lines += ["", title + "："] + ((assessment[key] as? [String]) ?? ["请看完整证据"]) }
         if let errors = event["errors"] as? [String], !errors.isEmpty { lines += ["", "失效原因："] + errors }
