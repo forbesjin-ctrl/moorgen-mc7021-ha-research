@@ -1,0 +1,28 @@
+name: 匿名兼容性反馈
+description: 只提交版本和单灯现象；不要上传原始抓包或住户标识
+title: "[兼容反馈] MC7021 / 固件版本"
+body:
+  - type: markdown
+    attributes:
+      value: "原始PCAP、完整日志、IP、UDID、账号、设备标识和房号请勿公开。私下交样见 docs/PRIVATE_SAMPLES.md。"
+  - type: input
+    id: sample
+    attributes:
+      label: 自选匿名样本编号
+      description: 不使用姓名、房号或设备标识
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: 主机型号 / 固件 / App平台与版本
+      description: 不知道的版本写未知，不为反馈升级设备
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: 单灯观察与证据范围
+      description: App开关、面板操作后是否自动更新/需刷新、重进App的显示；未做的写未做。不要粘贴报文。
+    validations:
+      required: true
