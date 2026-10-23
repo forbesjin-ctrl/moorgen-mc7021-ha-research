@@ -1,6 +1,7 @@
 """Post-capture analysis uses synthetic PCAP/events only; all I/O is local."""
 import copy
 import hashlib
+from html import escape
 import json
 from pathlib import Path
 import struct
@@ -14,6 +15,15 @@ sys.path.insert(0, str(ROOT / 'tools'))
 import analyze_capture as analysis
 import demo_sample as demo
 import offline_shcp as codec
+
+COLLECTION_ID = '00000000-0000-4000-8000-000000000001'
+
+
+def target_context(**changes):
+    result = dict(label='私有演练灯一', room='私有演练房间', kind='ordinary_switch_light',
+                  collection_id=COLLECTION_ID)
+    result.update(changes)
+    return result
 
 
 def packet(index, seq, payload=b'', flags=24, when=None):
@@ -213,6 +223,87 @@ class SessionAnalysisTests(unittest.TestCase):
     def test_device_type_is_not_inferred_from_command_or_name(self):
         _, report = self.analyze()
         self.assertTrue(all(state['candidate_is_on'] is None for f in report['frames'] for state in f['states']))
+        self.assertTrue(all(not row['ordinary_light_verified'] for row in report['device_candidates']))
+
+    def test_legacy_sample_without_context_is_compatible_and_explicitly_unknown(self):
+        destination, report = self.analyze()
+        self.assertIsNone(report['target_context'])
+        self.assertIsNone(json.loads((destination / 'report.json').read_text())['target_context'])
+        self.assertFalse(any(check['name'] == '业主自填标签（私有）' for check in report['quality']['checks']))
+        self.assertEqual(report['summary']['frame_count'], 18)
+        self.assertFalse(report['readiness']['can_start_live_ha'])
+
+    def test_valid_context_is_private_and_does_not_select_or_verify_devices(self):
+        _, baseline = self.analyze()
+        labels = target_context()
+        self.change_metadata(target_context=labels)
+        destination, report = self.analyze()
+        self.assertEqual(report['target_context'], labels)
+        self.assertEqual(json.loads((destination / 'report.json').read_text())['target_context'], labels)
+        self.assertEqual(report['frames'], baseline['frames'])
+        self.assertEqual(report['device_candidates'], baseline['device_candidates'])
+        self.assertTrue(all(state['candidate_is_on'] is None for frame in report['frames'] for state in frame['states']))
+        self.assertTrue(all(not row['ordinary_light_verified'] for row in report['device_candidates']))
+        self.assertFalse(report['readiness']['physical_feedback_verified'])
+        self.assertFalse(report['readiness']['can_start_live_ha'])
+        content = (destination / '报告.html').read_text()
+        self.assertIn(labels['label'], content)
+        self.assertIn(labels['room'], content)
+        self.assertIn('设备身份及普通灯类型尚未核验', content)
+        self.assertTrue(any('仅为业主声明' in item for item in report['unknowns']))
+
+    def test_private_labels_are_html_escaped_in_report(self):
+        labels = target_context(label='<img src=x onerror=alert(1)>', room='<script>alert("room")</script>')
+        self.change_metadata(target_context=labels)
+        destination, report = self.analyze()
+        content = (destination / '报告.html').read_text()
+        for key in ('label', 'room'):
+            self.assertNotIn(labels[key], content)
+            self.assertIn(escape(labels[key], quote=True), content)
+        self.assertEqual(report['target_context'], labels)
+        self.assertNotIn('<script>', content)
+        self.assertIn('设备身份及普通灯类型尚未核验', content)
+
+    def test_invalid_context_is_not_trusted_and_remains_a_warning_and_unknown(self):
+        for value in [target_context(label='坏\n标签'), target_context(kind='curtain'),
+                      target_context(collection_id='not-a-uuid'),
+                      target_context(ordinary_light_verified=True), ['not', 'context']]:
+            with self.subTest(context=value):
+                self.change_metadata(target_context=value)
+                destination, report = self.analyze()
+                self.assertIsNone(report['target_context'])
+                self.assertIsNone(json.loads((destination / 'report.json').read_text())['target_context'])
+                self.assertTrue(any('标签格式无效' in item and '未采信' in item for item in report['quality']['warnings']))
+                self.assertTrue(any('无效标签已忽略' in item for item in report['unknowns']))
+                self.assertTrue(all(not row['ordinary_light_verified'] for row in report['device_candidates']))
+                self.assertFalse(report['readiness']['can_start_live_ha'])
+
+    def test_context_never_flows_into_anonymous_summary_or_ha_parameters(self):
+        labels = target_context()
+        self.change_metadata(target_context=labels)
+        destination, report = self.analyze()
+        for artifact in ['匿名摘要.json', 'HA接入待验证.json']:
+            content = (destination / artifact).read_text()
+            value = json.loads(content)
+            for private_value in labels.values():
+                self.assertNotIn(private_value, content)
+            for private_key in ('target_context', 'label', 'room', 'collection_id'):
+                self.assertNotIn('"' + private_key + '"', content)
+            self.assertFalse(value.get('compatibility_verified', False))
+            self.assertFalse(value.get('physical_feedback_verified', False))
+            self.assertFalse(value.get('live_control_enabled', False))
+        anonymous = json.dumps(analysis.anonymous_summary(report), ensure_ascii=False)
+        self.assertNotIn(labels['label'], anonymous)
+        self.assertNotIn(labels['room'], anonymous)
+        self.assertNotIn(labels['collection_id'], anonymous)
+
+    def test_explicit_ordinary_ids_behavior_is_unchanged_by_private_context(self):
+        _, baseline = self.analyze(ordinary_ids=(demo.DEVICE,))
+        self.change_metadata(target_context=target_context())
+        _, report = self.analyze(ordinary_ids=(demo.DEVICE,))
+        self.assertEqual(report['frames'], baseline['frames'])
+        self.assertEqual(report['device_candidates'], baseline['device_candidates'])
+        self.assertTrue(any(state['candidate_is_on'] is not None for frame in report['frames'] for state in frame['states']))
         self.assertTrue(all(not row['ordinary_light_verified'] for row in report['device_candidates']))
 
     def test_metadata_symlink_is_not_followed(self):

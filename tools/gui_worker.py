@@ -206,11 +206,18 @@ def make_parser():
     modes = parser.add_subparsers(dest='mode', required=True,
                                 parser_class=SafeArgumentParser)
     modes.add_parser('demo')
+    modes.add_parser('collection-demo')
     analysis = modes.add_parser('analyze')
     analysis.add_argument('--session-dir', required=True, type=Path)
     sampling = modes.add_parser('capture')
     sampling.add_argument('--host-ip', required=True)
     sampling.add_argument('--udid', required=True)
+    sampling.add_argument('--target-label')
+    sampling.add_argument('--room-label')
+    sampling.add_argument('--collection-id')
+    sampling.add_argument('--baseline-reviewed', action='store_true')
+    collection = modes.add_parser('collection')
+    collection.add_argument('--capture-root', required=True, type=Path)
     return parser
 
 
@@ -243,6 +250,8 @@ def analyze_and_emit(protocol, directory, data_dir, ordinary_ids=(), capture_sta
 
 def run_capture(args, protocol, backend_factory=None):
     ip, udid = capture.validate_ip(args.host_ip), capture.validate_udid(args.udid)
+    context = capture.build_target_context(args.target_label, args.room_label, args.collection_id)
+    protocol.emit('capture_preflight', status='validated')
     protocol.secrets.append(udid)
     if backend_factory is None:
         try:
@@ -252,8 +261,11 @@ def run_capture(args, protocol, backend_factory=None):
         backend_factory = GuiSystemBackend
     backend = backend_factory()
     journal = capture.Journal(args.data_dir / 'captures', False)
+    if args.baseline_reviewed:
+        journal.record('baseline_review_declared', owner_declaration=True,
+            physical_identity_verified_by_tool=False, independent_state_verified_by_tool=False)
     session = GuiGuidedSession(ip, udid, journal, backend, protocol=protocol,
-        sample_origin='external_owner_household')
+        sample_origin='external_owner_household', target_context=context)
     with signal_handlers(session.signal_handler):
         metadata = session.run()
     # Cleanup has finished before any analysis is attempted, including on EOF,
@@ -292,6 +304,29 @@ def run(argv=None, protocol=None, backend_factory=None):
                         instruction='自动生成合成通信和事件记录，无需手机；不会建立接口或连接家庭设备。')
                     directory = demo.create_demo_sample(args.data_dir / 'demo_runs')
                     analyze_and_emit(protocol, directory, args.data_dir, ordinary_ids=(demo.DEVICE,))
+                    ok = True
+                elif args.mode in ('collection', 'collection-demo'):
+                    try:
+                        from .collection_report import analyze_collection
+                    except ImportError:
+                        from collection_report import analyze_collection
+                    collection_root = args.capture_root if args.mode == 'collection' else (
+                        args.data_dir / 'demo_collections' / uuid.uuid4().hex)
+                    if args.mode == 'collection-demo':
+                        identifier = uuid.uuid4().hex
+                        for name in ('合成普通灯A', '合成普通灯B'):
+                            directory = demo.create_demo_sample(collection_root / 'captures')
+                            path = directory / 'session.json'
+                            metadata = json.loads(path.read_text(encoding='utf-8'))
+                            metadata['target_context'] = capture.build_target_context(name, '合成房间', identifier)
+                            path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+                    protocol.emit('step', title='多轮离线汇总',
+                        instruction='逐轮读取并分析，不合并设备身份；完整报告仅存本机。')
+                    destination, report = analyze_collection(collection_root, args.data_dir / 'private_reports')
+                    protocol.emit('result', report_path=str(destination / 'collection.html'),
+                        report_dir=str(destination), summary=report['summary'],
+                        quality=report['quality']['level'], simulation=report.get('simulation'),
+                        capture_status=None, report_kind='collection')
                     ok = True
                 elif args.mode == 'analyze':
                     analyze_and_emit(protocol, args.session_dir, args.data_dir)

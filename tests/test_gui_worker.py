@@ -1,5 +1,6 @@
 """GUI worker tests with local synthetic files and mocked capture boundaries."""
 import importlib.util
+import hashlib
 import io
 import json
 import os
@@ -148,6 +149,161 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(analyze.call_args.kwargs['ordinary_ids'], ())
         self.assertEqual(analyze.call_args.kwargs['output_root'], self.root / 'data/private_reports')
         self.assertEqual(events(output)[-1]['type'], 'finished')
+
+    def test_collection_demo_is_two_explicit_synthetic_rounds_without_backend_or_admin(self):
+        protocol, output = self.protocol()
+        factory = mock.Mock(side_effect=AssertionError('No capture backend in collection demonstration'))
+        with mock.patch.object(capture.SystemBackend, 'prepare',
+                side_effect=AssertionError('No capture preparation')) as prepare, \
+                mock.patch.object(capture.SystemBackend, 'authorize',
+                side_effect=AssertionError('No administrator authorization')) as authorize, \
+                mock.patch.object(worker, 'run_capture', side_effect=AssertionError('No capture run')) as run_capture:
+            code = worker.run(self.args('collection-demo'), protocol, backend_factory=factory)
+        self.assertEqual(code, 0, output.getvalue())
+        factory.assert_not_called()
+        prepare.assert_not_called()
+        authorize.assert_not_called()
+        run_capture.assert_not_called()
+        rows = events(output)
+        self.assertEqual(rows[-1], dict(type='finished', ok=True))
+        self.assertEqual(sum(row['type'] == 'finished' for row in rows), 1)
+        self.assertEqual(sum(row['type'] == 'result' for row in rows), 1)
+        self.assertFalse(any(row['type'] == 'prompt' for row in rows))
+        result = next(row for row in rows if row['type'] == 'result')
+        self.assertEqual(result['report_kind'], 'collection')
+        self.assertIs(result['simulation'], True)
+        self.assertEqual(result['summary']['round_count'], 2)
+        self.assertEqual(result['summary']['identifier_collision_count'], 1)
+        report = json.loads((Path(result['report_dir']) / 'collection.json').read_text())
+        self.assertFalse(report['readiness']['automatic_entity_mapping_enabled'])
+        self.assertFalse(report['identifier_collisions'][0]['physical_entities_merged'])
+        sample_paths = list((self.root / 'data/demo_collections').glob('*/captures/*/session.json'))
+        self.assertEqual(len(sample_paths), 2)
+        metadata = [json.loads(path.read_text()) for path in sample_paths]
+        self.assertTrue(all(row['simulation'] is True for row in metadata))
+        self.assertTrue(all(row['sample_origin'] == 'synthetic_fixture' for row in metadata))
+        self.assertTrue(all(row['project_household_verified'] is False for row in metadata))
+        self.assertEqual({row['target_context']['label'] for row in metadata}, {'合成普通灯A', '合成普通灯B'})
+        self.assertEqual(len({row['target_context']['collection_id'] for row in metadata}), 1)
+        self.assertTrue(all(row['target_context']['kind'] == 'ordinary_switch_light' for row in metadata))
+        self.assertFalse((self.root / 'data/captures').exists())
+
+    def test_collection_reads_existing_rounds_without_modifying_inputs(self):
+        source = self.root / 'selected_data'
+        directory = worker.demo.create_demo_sample(source / 'captures')
+        before = {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in directory.iterdir()}
+        protocol, output = self.protocol()
+        factory = mock.Mock(side_effect=AssertionError('No capture backend in existing collection analysis'))
+        code = worker.run(self.args('collection', '--capture-root', str(source)),
+                          protocol, backend_factory=factory)
+        self.assertEqual(code, 0, output.getvalue())
+        factory.assert_not_called()
+        self.assertEqual(before, {path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+                                 for path in directory.iterdir()})
+        result = next(row for row in events(output) if row['type'] == 'result')
+        self.assertEqual(result['summary']['round_count'], 1)
+        self.assertTrue(Path(result['report_path']).is_file())
+        self.assertEqual(Path(result['report_dir']).parent, self.root / 'data/private_reports')
+        self.assertEqual(sum(row['type'] == 'finished' for row in events(output)), 1)
+
+    def test_collection_failed_round_is_reported_as_blocked_and_not_zero_traffic(self):
+        source = self.root / 'selected_data'
+        worker.demo.create_demo_sample(source / 'captures')
+        broken = source / 'captures/broken'
+        broken.mkdir()
+        (broken / 'session.json').write_text('{broken synthetic metadata')
+        protocol, output = self.protocol()
+        code = worker.run(self.args('collection', '--capture-root', str(source)), protocol)
+        self.assertEqual(code, 0, output.getvalue())  # The collection report itself was generated.
+        rows = events(output)
+        result = next(row for row in rows if row['type'] == 'result')
+        self.assertEqual(result['quality'], 'blocked')
+        self.assertEqual(result['summary']['failed_count'], 1)
+        self.assertEqual(result['summary']['analyzed_count'], 1)
+        self.assertIsNone(result['summary']['packet_count'])
+        report = json.loads((Path(result['report_dir']) / 'collection.json').read_text())
+        failure = next(row for row in report['rounds'] if row['status'] == 'failed')
+        self.assertIn('JSONDecodeError', failure['error'])
+        self.assertEqual(failure['summary'], {})
+        self.assertEqual(rows[-1], dict(type='finished', ok=True))
+        self.assertEqual(sum(row['type'] == 'finished' for row in rows), 1)
+
+    def test_collection_missing_directory_is_json_error_without_backend(self):
+        protocol, output = self.protocol()
+        factory = mock.Mock(side_effect=AssertionError('No backend'))
+        code = worker.run(self.args('collection', '--capture-root', str(self.root / 'missing')),
+                          protocol, backend_factory=factory)
+        self.assertEqual(code, 1)
+        factory.assert_not_called()
+        rows = events(output)
+        self.assertEqual(rows[-1], dict(type='finished', ok=False))
+        self.assertEqual(sum(row['type'] == 'finished' for row in rows), 1)
+        self.assertTrue(any(row['type'] == 'error' for row in rows))
+        self.assertFalse(any(row['type'] == 'result' for row in rows))
+        self.assertNotIn('Traceback', output.getvalue())
+
+    def test_capture_target_labels_are_private_metadata_without_device_verification(self):
+        protocol, output = self.protocol(['', ''])
+        backend = FakeBackend()
+        args = self.capture_args() + ['--target-label', '合成测试标签', '--room-label', '合成房间',
+                                      '--collection-id', '00000000000000000000000000000001']
+        def analyze(directory, output_root=None, ordinary_ids=()):
+            metadata = json.loads((directory / 'session.json').read_text())
+            self.assertEqual(metadata['target_context'], dict(label='合成测试标签', room='合成房间',
+                kind='ordinary_switch_light', collection_id='00000000000000000000000000000001'))
+            self.assertFalse(metadata['project_household_verified'])
+            self.assertEqual(ordinary_ids, ())
+            self.assertTrue(backend.capture.stopped)
+            return self.fake_analysis(directory, output_root, ordinary_ids)
+        with mock.patch.object(worker.GuiGuidedSession, 'flow', lambda session: self.short_flow(session)), \
+                mock.patch.object(worker, 'analyze_session', side_effect=analyze):
+            self.assertEqual(worker.run(args, protocol, backend_factory=lambda: backend), 0, output.getvalue())
+        self.assertEqual(events(output)[-1], dict(type='finished', ok=True))
+
+    def test_invalid_target_context_stops_before_backend_or_interface_creation(self):
+        protocol, output = self.protocol()
+        factory = mock.Mock(side_effect=AssertionError('No backend for invalid target'))
+        args = self.capture_args() + ['--target-label', '合成\n测试']
+        code = worker.run(args, protocol, backend_factory=factory)
+        self.assertEqual(code, 1)
+        factory.assert_not_called()
+        self.assertFalse((self.root / 'data/captures').exists())
+        self.assertEqual(events(output)[-1], dict(type='finished', ok=False))
+
+    def test_invalid_capture_inputs_never_emit_validated_preflight_marker(self):
+        cases = [self.args('capture', '--host-ip', 'example.invalid', '--udid', UDID),
+                 self.capture_args() + ['--target-label', '合成\n测试'],
+                 self.args('capture', '--host-ip', IP, '--udid', 'invalid-synthetic-udid')]
+        for args in cases:
+            with self.subTest(args=args):
+                protocol, output = self.protocol()
+                factory = mock.Mock(side_effect=AssertionError('Invalid inputs must not construct a backend'))
+                self.assertEqual(worker.run(args, protocol, backend_factory=factory), 1)
+                factory.assert_not_called()
+                self.assertFalse(any(row['type'] == 'capture_preflight' for row in events(output)))
+                self.assertFalse((self.root / 'data/captures').exists())
+                self.assertEqual(events(output)[-1], dict(type='finished', ok=False))
+
+    def test_validated_preflight_marker_precedes_backend_construction(self):
+        protocol, output = self.protocol(['', ''])
+        backend = FakeBackend()
+        observed = []
+        def factory():
+            rows = events(output)
+            self.assertEqual(rows, [dict(type='capture_preflight', status='validated')])
+            self.assertEqual(backend.calls, [])
+            self.assertFalse((self.root / 'data/captures').exists())
+            observed.append('backend_constructed_after_marker')
+            return backend
+        with mock.patch.object(worker.GuiGuidedSession, 'flow', lambda session: self.short_flow(session)), \
+                mock.patch.object(worker, 'analyze_session', side_effect=self.fake_analysis):
+            self.assertEqual(worker.run(self.capture_args(), protocol, backend_factory=factory), 0,
+                             output.getvalue())
+        self.assertEqual(observed, ['backend_constructed_after_marker'])
+        self.assertEqual(sum(row['type'] == 'capture_preflight' for row in events(output)), 1)
+        self.assertEqual(events(output)[-1], dict(type='finished', ok=True))
+        self.assertTrue(backend.capture.stopped)
+        self.assertEqual(backend.calls[-1], 'remove')
 
     def test_missing_sample_emits_error_without_traceback(self):
         protocol, output = self.protocol()

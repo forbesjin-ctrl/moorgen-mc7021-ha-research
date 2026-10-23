@@ -19,10 +19,12 @@ try:
     from . import offline_shcp as codec
     from .pcap_reader import read_pcap, PcapError
     from .report_view import render_report
+    from .capture_mc7021_light import validate_target_context
 except ImportError:
     import offline_shcp as codec
     from pcap_reader import read_pcap, PcapError
     from report_view import render_report
+    from capture_mc7021_light import validate_target_context
 
 VERSION = '0.2.0'
 MAX_METADATA = 4 * 1024 * 1024
@@ -355,6 +357,20 @@ def analyze_session(directory, output_root=None, ordinary_ids=()):
     checks, warnings, unknowns = [], [], []
     def check(name, status, detail):
         checks.append(dict(name=name, status=status, detail=detail))
+    # Labels remain local research notes. Never use a room/name/kind declaration
+    # to select an online identifier or to populate confirmed ordinary_ids.
+    target_context = None
+    try:
+        target_context = validate_target_context(metadata.get('target_context'))
+    except ValueError:
+        check('业主自填标签（私有）', 'warn', '标签格式无效，未采信；保留原始会话文件供本机核对。')
+        warnings.append('本轮业主自填标签格式无效，未采信。')
+        unknowns.append('无效标签已忽略；本轮名称、房间、批次与实际设备的对应关系仍未知。')
+    if target_context is not None:
+        check('业主自填标签（私有）', 'warn',
+            '本轮灯光：{}；房间：{}。仅为业主自填描述，设备身份及普通灯类型尚未核验；'
+            '名称、房间和批次不是通信地址。'.format(target_context['label'], target_context['room'] or '未填写'))
+        unknowns.append('本轮私有灯光标签仅为业主声明；与通信标识、实际灯路及设备类型的对应关系尚未核验。')
     simulation = metadata.get('simulation') if type(metadata.get('simulation')) is bool else None
     check('样本来源', 'warn' if simulation is not False else 'pass',
           '合成/演练，不能用于住户验证' if simulation else '来源为真实采样声明，尚未经住宅身份核验' if simulation is False else '缺少来源标志')
@@ -453,6 +469,7 @@ def analyze_session(directory, output_root=None, ordinary_ids=()):
         dict(name='会话与安全控制条件', status='pending', detail='认证、加密及在线稳定性未验证'),
         dict(name='HA单灯适配及现场测试', status='pending', detail='尚未实现可用的在线适配器')]
     report = dict(schema_version=VERSION, analysis_id=uuid.uuid4().hex, simulation=simulation,
+        target_context=target_context,
         source=dict(folder=directory.name, capture_status=source_status, target_ip=target,
                     sample_origin=metadata.get('sample_origin', 'unknown'), input_integrity=input_integrity,
                     linktype=capture['linktype'], format=capture['format']),

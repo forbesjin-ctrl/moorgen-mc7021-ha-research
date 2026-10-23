@@ -36,3 +36,4 @@ __pycache__/
 *.tar.gz
 *.tar.zst
 /macos/capture-helper
+/demo_collections/

@@ -24,6 +24,14 @@ spec.loader.exec_module(capture)
 UDID = '00000001-0000000000000001'
 OTHER_UDID = '1111111111111111111111111111111111111111'
 IP = '192.0.2.20'
+COLLECTION_ID = '00000000-0000-4000-8000-000000000001'
+
+
+def target_context(**changes):
+    value = dict(label='演练灯一', room='演练房间', kind='ordinary_switch_light',
+                 collection_id=COLLECTION_ID)
+    value.update(changes)
+    return value
 
 
 class InputValidationTests(unittest.TestCase):
@@ -63,6 +71,71 @@ class InputValidationTests(unittest.TestCase):
         self.assertEqual(capture.capture_filter('2001:db8::42'), 'host 2001:db8::42 and (tcp or udp)')
         with self.assertRaises(ValueError):
             capture.capture_filter('192.0.2.20 or host 198.51.100.1')
+
+
+class TargetContextValidationTests(unittest.TestCase):
+    def test_legacy_absence_does_not_create_labels_or_collection(self):
+        self.assertIsNone(capture.validate_target_context(None))
+        with mock.patch.object(capture.uuid, 'uuid4', side_effect=AssertionError('no grouping requested')):
+            self.assertIsNone(capture.build_target_context())
+
+    def test_exact_private_values_are_preserved_and_copied(self):
+        original = target_context(label='  演练灯一  ', room='',
+            collection_id='ABCDEF01020304050607080910111213')
+        result = capture.validate_target_context(original)
+        self.assertEqual(result, original)
+        self.assertIsNot(result, original)
+        original['label'] = '后续修改'
+        self.assertEqual(result['label'], '  演练灯一  ')
+
+    def test_missing_extra_and_non_mapping_fields_are_rejected(self):
+        for value in [[], '', False, {}, target_context(device_id='0001')]:
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                capture.validate_target_context(value)
+        for key in target_context():
+            value = target_context()
+            del value[key]
+            with self.subTest(missing=key), self.assertRaises(ValueError):
+                capture.validate_target_context(value)
+
+    def test_label_room_bounds_types_and_control_characters(self):
+        self.assertEqual(capture.validate_target_context(target_context(label='灯' * 80, room='室' * 80))['room'], '室' * 80)
+        for key, values in [('label', ['', ' ' * 3, '灯' * 81, None, 1, True]),
+                            ('room', ['室' * 81, None, 1, False])]:
+            for value in values:
+                with self.subTest(key=key, value=value), self.assertRaises(ValueError):
+                    capture.validate_target_context(target_context(**{key: value}))
+        for key in ('label', 'room'):
+            for char in ['\x00', '\t', '\r', '\n', '\x7f', '\x85', '\u200b', '\u202e', '\u2028', '\u2029', '\ud800']:
+                with self.subTest(key=key, char=repr(char)), self.assertRaises(ValueError):
+                    capture.validate_target_context(target_context(**{key: '演练' + char}))
+
+    def test_only_owner_declared_ordinary_light_kind_is_accepted(self):
+        for kind in ['verified_light', 'curtain', 'ordinary_switch_light ', '', None, True]:
+            with self.subTest(kind=kind), self.assertRaises(ValueError):
+                capture.validate_target_context(target_context(kind=kind))
+
+    def test_collection_id_is_uuid_or_32_hex_and_never_an_online_address(self):
+        for value in [COLLECTION_ID, COLLECTION_ID.upper(), '0' * 32, 'abcdef0123456789' * 2]:
+            with self.subTest(value=value):
+                self.assertEqual(capture.validate_target_context(target_context(collection_id=value))['collection_id'], value)
+        for value in ['192.0.2.20', '0001', 'g' * 32, '0' * 31, '0' * 33,
+                      '{' + COLLECTION_ID + '}', 'urn:uuid:' + COLLECTION_ID,
+                      COLLECTION_ID + '\n', None, 1, True]:
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                capture.validate_target_context(target_context(collection_id=value))
+
+    def test_builder_requires_label_and_only_fills_optional_defaults(self):
+        with mock.patch.object(capture.uuid, 'uuid4') as identifier:
+            identifier.return_value.hex = '0' * 31 + '1'
+            self.assertEqual(capture.build_target_context('演练灯一'), target_context(
+                room='', collection_id='0' * 31 + '1'))
+            identifier.assert_called_once_with()
+        self.assertEqual(capture.build_target_context('演练灯一', '演练房间', COLLECTION_ID), target_context())
+        for kwargs in [dict(room='演练房间'), dict(collection_id=COLLECTION_ID),
+                       dict(room='', collection_id=COLLECTION_ID)]:
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                capture.build_target_context(**kwargs)
 
 
 class RVIParserTests(unittest.TestCase):
@@ -169,10 +242,11 @@ class SessionTests(unittest.TestCase):
         self.output.__enter__()
         self.addCleanup(self.output.__exit__, None, None, None)
 
-    def session(self, backend=None, input_fn=lambda _: ''):
+    def session(self, backend=None, input_fn=lambda _: '', **kwargs):
         backend = backend or FakeBackend()
         journal = capture.Journal(self.parent, backend.simulated)
-        session = capture.GuidedSession(IP, UDID, journal, backend, input_fn=input_fn, sleep_fn=lambda _: None)
+        session = capture.GuidedSession(IP, UDID, journal, backend, input_fn=input_fn,
+            sleep_fn=lambda _: None, **kwargs)
         return session, backend
 
     def run_short(self, session):
@@ -194,6 +268,56 @@ class SessionTests(unittest.TestCase):
             self.assertTrue(rows[-1]['timestamp'].endswith('+08:00'))
         finally:
             journal.close()
+
+    def test_context_is_private_declared_metadata_and_not_verified_identity(self):
+        supplied = target_context()
+        session, backend = self.session(target_context=supplied)
+        supplied['label'] = '不应改变已存记录'
+        result = self.run_short(session)
+        self.assertEqual(result['target_context'], target_context())
+        self.assertFalse(result['project_household_verified'])
+        self.assertFalse(result['runtime_compatibility_verified'])
+        rows = session.journal.rows
+        self.assertNotIn('target_context', rows[0])
+        declared = [row for row in rows if row['event'] == 'target_context_declared']
+        self.assertEqual(len(declared), 1)
+        self.assertEqual(declared[0]['target_context'], target_context())
+        self.assertFalse(declared[0]['device_identity_verified'])
+        self.assertFalse(declared[0]['device_type_verified'])
+        self.assertIn('not protocol identity', declared[0]['evidence'])
+        self.assertEqual([row for row in backend.calls if row[0] == 'capture'], [('capture', IP, 'rvi2')])
+
+    def test_legacy_session_and_event_shape_remain_unlabeled(self):
+        session, _ = self.session(capture.DemoBackend())
+        result = self.run_short(session)
+        self.assertNotIn('target_context', result)
+        self.assertFalse(any(row['event'] == 'target_context_declared' for row in session.journal.rows))
+
+    def test_invalid_context_cannot_reach_backend_or_summary_creation(self):
+        backend = FakeBackend()
+        journal = capture.Journal(self.parent, False)
+        try:
+            with self.assertRaises(ValueError):
+                capture.GuidedSession(IP, UDID, journal, backend, target_context=target_context(kind='curtain'))
+            self.assertEqual(backend.calls, [])
+            self.assertFalse((journal.directory / 'session.json').exists())
+        finally:
+            journal.close()
+
+    def test_separate_lights_share_only_local_collection_and_keep_distinct_sessions(self):
+        results = []
+        directories = []
+        with mock.patch.object(capture.subprocess, 'run', side_effect=AssertionError('tool forbidden')), \
+             mock.patch.object(capture.subprocess, 'Popen', side_effect=AssertionError('tool forbidden')):
+            for label in ['演练灯一', '演练灯二']:
+                session, _ = self.session(capture.DemoBackend(), target_context=target_context(label=label))
+                results.append(self.run_short(session))
+                directories.append(session.journal.directory)
+        self.assertNotEqual(*directories)
+        self.assertEqual([value['target_context']['label'] for value in results], ['演练灯一', '演练灯二'])
+        self.assertEqual({value['target_context']['collection_id'] for value in results}, {COLLECTION_ID})
+        self.assertTrue(all(value['target_ip'] == IP for value in results))
+        self.assertTrue(all(not (directory / 'traffic.pcap').exists() for directory in directories))
 
     def test_existing_target_rvi_is_never_authorized_created_or_deleted(self):
         session, backend = self.session(FakeBackend(existing=[(UDID.lower(), 'rvi8')]))
@@ -541,6 +665,56 @@ class SessionTests(unittest.TestCase):
         self.assertTrue(all(row['simulation'] for row in session.journal.rows))
         persisted = (session.journal.directory / 'session.json').read_text()
         self.assertNotIn(UDID, persisted)
+
+
+class TargetContextCLITests(unittest.TestCase):
+    def test_bad_context_is_rejected_before_phone_prompts_or_tool_calls(self):
+        for arguments in [ ['--room-label', '演练房间'], ['--collection-id', COLLECTION_ID],
+                           ['--target-label', '演练灯一', '--collection-id', 'not-a-uuid'],
+                           ['--target-label', '演练\n灯一'] ]:
+            with self.subTest(arguments=arguments), contextlib.redirect_stderr(io.StringIO()), \
+                 mock.patch('builtins.input', side_effect=AssertionError('no phone prompt')), \
+                 mock.patch.object(capture.subprocess, 'run', side_effect=AssertionError('tool forbidden')), \
+                 mock.patch.object(capture.subprocess, 'Popen', side_effect=AssertionError('tool forbidden')):
+                with self.assertRaises(SystemExit) as error:
+                    capture.main(arguments)
+                self.assertEqual(error.exception.code, 2)
+
+    def test_cli_demo_records_declared_context_without_any_system_process(self):
+        def reply(prompt):
+            if 'MC7021 当前IP' in prompt:
+                return IP
+            if 'iPhone UDID' in prompt:
+                return UDID
+            if any(text in prompt for text in ['实际灯', 'App显示', '自动更新', '刷新入口', '是否需要']):
+                return '2'
+            return ''
+        constructor = capture.GuidedSession
+        def session_with_fake_input(*args, **kwargs):
+            return constructor(*args, input_fn=reply, **kwargs)
+        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()), \
+             mock.patch.object(capture, 'OUTPUTS', Path(temporary)), \
+             mock.patch('builtins.input', side_effect=reply), \
+             mock.patch.object(capture, 'GuidedSession', side_effect=session_with_fake_input), \
+             mock.patch.object(capture.subprocess, 'run', side_effect=AssertionError('tool forbidden')), \
+             mock.patch.object(capture.subprocess, 'Popen', side_effect=AssertionError('tool forbidden')):
+            code = capture.main(['--demo', '--target-label', '演练灯一', '--room-label', '演练房间',
+                                 '--collection-id', COLLECTION_ID])
+            saved = list((Path(temporary) / 'demo_runs').glob('*/session.json'))
+            self.assertEqual(len(saved), 1)
+            result = json.loads(saved[0].read_text())
+            self.assertEqual(code, 0)
+            self.assertEqual(result['target_context'], target_context())
+            self.assertEqual(result['status'], 'demo_completed')
+            self.assertTrue(result['flow_completed'])
+            self.assertFalse((saved[0].parent / 'traffic.pcap').exists())
+            rows = [json.loads(line) for line in (saved[0].parent / 'events.jsonl').read_text().splitlines()]
+            steps = [row['step'] for row in rows if row['event'] == 'action_confirmed']
+            self.assertTrue({'App开1', 'App关1', 'App开2', 'App关2', '面板开', '面板关',
+                '关闭App', 'App关闭期间面板开', '重进App读状态'}.issubset(steps))
+            self.assertEqual(result['household_control_commands_sent'], 0)
+            self.assertEqual(result['endpoint_probes_sent'], 0)
+            self.assertEqual(result['device_configuration_writes'], 0)
 
 
 class FakeProcess:

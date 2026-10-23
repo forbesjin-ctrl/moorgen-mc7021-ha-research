@@ -11,7 +11,19 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let folderLabel = NSTextField(wrappingLabelWithString: "首次使用时选择本机数据文件夹。")
     private let host = NSTextField(string: "")
     private let udid = NSTextField(string: "")
-    private let consent = NSButton(checkboxWithTitle: "我确认现场条件符合上述要求，只测同一组普通灯", target: nil, action: nil)
+    private let targetName = NSTextField(string: "")
+    private let targetRoom = NSTextField(string: "")
+    private var collectionID = UUID().uuidString
+    private var baselineConnection: String?
+    private var baselineKey: String?
+    private var activeCaptureKey: String?
+    private var baselineHasCompleteReport = false
+    private var captureCleanupUncertain = false
+    private var capturePreflightPassed = false
+    private var lastCollectionFailedCount = 0
+    private let baselineReview = NSButton(checkboxWithTitle: "首组已由分析者逐包核对：开关标识、面板独立状态与肉眼一致、重进App回读", target: nil, action: nil)
+    private let consent = NSButton(checkboxWithTitle: "我确认现场条件符合要求，本轮只操作填写的这一组普通灯", target: nil, action: nil)
+    private var captureContents: NSView?
     private let stepTitle = NSTextField(wrappingLabelWithString: "等待开始")
     private let instruction = NSTextField(wrappingLabelWithString: "")
     private let promptText = NSTextField(wrappingLabelWithString: "")
@@ -49,7 +61,7 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
            FileManager.default.fileExists(atPath: path) { dataDirectory = URL(fileURLWithPath: path, isDirectory: true) }
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1040, height: 800),
                           styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
-        window.title = "MC7021 单灯研究工具 · v0.3.0"
+        window.title = "MC7021 研究工具 · v0.4.0"
         window.minSize = NSSize(width: 920, height: 740)
         window.delegate = self
         let content = window.contentView!
@@ -61,7 +73,7 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             root.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -26),
             root.topAnchor.constraint(equalTo: content.topAnchor, constant: 24),
             root.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -20)])
-        root.addArrangedSubview(label("摩根 MC7021 · 一组普通灯", 24, .semibold))
+        root.addArrangedSubview(label("摩根 MC7021 · 逐灯采样与研究", 24, .semibold))
         root.addArrangedSubview(label("保留原主机和面板。代码公开，住户抓包及完整报告只存本机、私下处理。", 13, .regular))
         tabs.target = self; tabs.action = #selector(changePage); tabs.selectedSegment = 0
         tabs.setAccessibilityIdentifier("main-navigation")
@@ -153,6 +165,7 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let result = stack([label("先看完整流程", 20, .semibold),
             label("生成明确标为合成的通信和操作记录，自动完成离线分析，并在应用内查看中文报告。\n不用手机、不填 IP / UDID、不提权，不接触家庭设备。"),
             button("生成演示报告", #selector(startDemo)),
+            button("多轮合成演示与汇总", #selector(startCollectionDemo)),
             label("演示证明软件流程，不能验证任何住宅，也不是可安装的 Home Assistant 集成。", 12)])
         return topAligned(result)
     }
@@ -160,16 +173,23 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func makeCapturePage() -> NSView {
         host.placeholderString = "已从现有 App 或设备记录确认的当前 IP"; host.setAccessibilityLabel("MC7021 当前 IP")
         udid.placeholderString = "在 Finder 中选中 iPhone 后复制 UDID"; udid.setAccessibilityLabel("iPhone UDID")
-        let grid = NSGridView(views: [[label("MC7021 当前 IP"), host], [label("iPhone UDID"), udid]])
+        targetName.placeholderString = "例如客厅主灯；用于私下区分轮次，不是设备地址"
+        targetName.setAccessibilityLabel("本轮灯名")
+        targetRoom.placeholderString = "可选，例如客厅"; targetRoom.setAccessibilityLabel("本轮房间")
+        let grid = NSGridView(views: [[label("MC7021 当前 IP"), host], [label("iPhone UDID"), udid],
+            [label("本轮灯名"), targetName], [label("本轮房间（可选）"), targetRoom]])
         grid.rowSpacing = 12; grid.columnSpacing = 16; grid.column(at: 0).width = 130
         grid.column(at: 1).xPlacement = .fill
         let available = FileManager.default.isExecutableFile(atPath: "/Library/Apple/usr/bin/rvictl")
         let tools = label(available ? "Apple USB 抓包组件：已找到。实际使用前仍会检查连接和信任状态。" :
             "缺少 Apple USB 抓包组件 rvictl，真实采样暂不可用；演示、分析和报告仍可使用。", 12)
-        let result = stack([label("只采同一组普通灯", 20, .semibold),
+        let result = stack([label("可以采多盏，每轮只操作一组", 20, .semibold),
             label("需要人在这套房子里，iPhone 连平时的家庭 Wi-Fi，USB 接 Mac 并信任。原厂 App 和面板本来就能正常控制这组灯。\n只做正常 App / 面板操作，不扫描、不修改配置、不涉及场景、总断电或安防。", 13),
-            grid, consent, button("开始采样", #selector(startCapture)), tools])
+            label("先采第一组并人工对准请求、面板变化、肉眼状态与App回读，再逐组扩展。每轮独立保存；报告成功不自动确认身份或状态。IP/UDID可在本次打开期间复用。", 12),
+            grid, consent, baselineReview, button("开始本轮采样", #selector(startCapture)), tools])
+        baselineReview.isEnabled = baselineHasCompleteReport
         grid.widthAnchor.constraint(equalTo: result.widthAnchor).isActive = true
+        captureContents = result
         return topAligned(result)
     }
 
@@ -177,6 +197,8 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return topAligned(stack([label("分析已有采样", 20, .semibold),
             label("选择包含 session.json、events.jsonl、traffic.pcap 的完整采样文件夹。原件只读，无需手机或管理员权限。"),
             button("选择采样文件夹并分析…", #selector(startAnalysis)),
+            button("汇总本机多轮采样", #selector(startCollection)),
+            label("汇总当前数据文件夹的captures目录，每一轮独立分析。旧样本无灯名时显示未知；相同报文标识只提示冲突，不自动合并为同一灯。", 12),
             label("报告会检查完整性、关联操作时间线，并区分开关请求、执行应答、ACK 和状态候选。不能识别或证据不足时保留未知。", 13)]))
     }
 
@@ -218,6 +240,9 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if panel.runModal() == .OK, let selected = panel.url {
             guard FileManager.default.isWritableFile(atPath: selected.path) else { alert("无法写入", "请选择你有写入权限的文件夹。"); return }
             dataDirectory = selected; UserDefaults.standard.set(selected.path, forKey: "data-directory")
+            baselineKey = nil; baselineHasCompleteReport = false
+            baselineConnection = nil; collectionID = UUID().uuidString
+            baselineReview.state = .off; baselineReview.isEnabled = false
             updateFolderLabel(); reloadReports()
         }
     }
@@ -228,6 +253,11 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @objc private func startDemo() { start(mode: "demo", arguments: []) }
+    @objc private func startCollectionDemo() { start(mode: "collection-demo", arguments: []) }
+    @objc private func startCollection() {
+        guard let directory = requireDataDirectory() else { return }
+        start(mode: "collection", arguments: ["--capture-root", directory.path])
+    }
 
     @objc private func startAnalysis() {
         guard !busy else { alert("任务进行中", "请先结束并保存当前任务。"); return }
@@ -242,9 +272,29 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     @objc private func startCapture() {
         guard !busy else { alert("任务进行中", "请先结束并保存当前任务。"); return }
+        guard !captureCleanupUncertain else { alert("先确认清理记录", "上次采样没有确认接口和进程清理，已停止后续采样。请保留日志并人工核对；不要直接换灯重试。"); return }
         guard consent.state == .on else { alert("先确认现场条件", "请确认你在这套房子内，且原 App / 面板均能正常控制同一组普通灯。"); return }
+        guard requireDataDirectory() != nil else { return }
         let address = host.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let identifier = udid.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = targetName.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let room = targetRoom.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, name.count <= 80, room.count <= 80,
+              name.rangeOfCharacter(from: .controlCharacters) == nil,
+              room.rangeOfCharacter(from: .controlCharacters) == nil else {
+            alert("请填写本轮灯名", "用房间和灯名区分每轮，如客厅主灯。每项最多80字，不能有控制字符；标签不证明线上设备身份。"); return
+        }
+        let key = room + "\n" + name
+        let connection = address + "\n" + identifier.lowercased()
+        if let previous = baselineConnection, previous != connection {
+            baselineKey = nil; baselineHasCompleteReport = false
+            baselineReview.state = .off; baselineReview.isEnabled = false
+            collectionID = UUID().uuidString; baselineConnection = nil
+        }
+        if let first = baselineKey, key != first,
+           (!baselineHasCompleteReport || baselineReview.state != .on) {
+            alert("先核对第一组", "先完成第一组的重复App开关、面板变化与肉眼亮灭对照，以及重进App状态回读。完整报告生成后仍需人工复核，并勾选首组核对声明，才换其它灯。收到ACK不算状态确认；也可保持原灯名补采。"); return
+        }
         var v4 = in_addr(); var v6 = in6_addr()
         guard inet_pton(AF_INET, address, &v4) == 1 || inet_pton(AF_INET6, address, &v6) == 1 else {
             alert("IP 格式不正确", "只填已确认的单个数字 IP，不带端口、网段或命令；不知道时不要猜或扫描。"); return
@@ -254,7 +304,15 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
               !identifier.replacingOccurrences(of: "-", with: "").allSatisfy({ $0 == "0" }) else {
             alert("UDID 格式不正确", "请在 Finder 选中已连接的 iPhone，点击设备信息切换后复制 UDID。不要填序列号。"); return
         }
-        start(mode: "capture", arguments: ["--host-ip", address, "--udid", identifier])
+        var arguments = ["--host-ip", address, "--udid", identifier,
+            "--target-label", name, "--room-label", room, "--collection-id", collectionID]
+        if baselineReview.state == .on { arguments.append("--baseline-reviewed") }
+        start(mode: "capture", arguments: arguments)
+        if busy {
+            if baselineKey == nil { baselineKey = key }
+            baselineConnection = connection
+            activeCaptureKey = key
+        }
     }
 
     private func start(mode: String, arguments: [String]) {
@@ -282,14 +340,17 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let input = Pipe(), output = Pipe(), error = Pipe()
         process.standardInput = input; process.standardOutput = output; process.standardError = error
         worker = process; inputPipe = input; finishedEvent = false; lastFinishedOK = false
+        capturePreflightPassed = false
+        lastCollectionFailedCount = 0
         lastCaptureStatus = nil; lastError = ""; isStopping = false; activeMode = mode; stderrTail = ""
         taskPanel?.isHidden = false; logPanel?.isHidden = true
+        if mode == "capture" { captureContents?.isHidden = true }
         stepTitle.stringValue = mode == "capture" ? "正在检查并准备采样" : mode == "demo" ? "正在生成合成演示" : "正在分析本地样本"
-        instruction.stringValue = mode == "capture" ? "系统授权框可能询问 Mac 管理员密码；密码只由系统读取。" : "全部在本机处理，原始采样只读。"
+        instruction.stringValue = mode == "capture" ? "本轮：\(targetRoom.stringValue) · \(targetName.stringValue)。系统授权框可能询问Mac管理员密码。" : "全部在本机处理，原始采样只读。"
         promptText.stringValue = ""; clearPrompt(); logView.string = ""; stopButton.isEnabled = true
         progress.isIndeterminate = true; progress.startAnimation(nil); status.stringValue = "任务进行中，结果不会自动上传。"
         do { try process.run() }
-        catch { worker = nil; inputPipe = nil; stopButton.isEnabled = false; taskPanel?.isHidden = true; progress.stopAnimation(nil); alert("未能启动", "应用内置运行组件无法启动。请保留完整应用并重新解压。"); return }
+        catch { worker = nil; inputPipe = nil; stopButton.isEnabled = false; taskPanel?.isHidden = true; captureContents?.isHidden = false; progress.stopAnimation(nil); alert("未能启动", "应用内置运行组件无法启动。请保留完整应用并重新解压。"); return }
         outputQueue.async { [weak self] in
             var buffer = Data()
             while true {
@@ -333,9 +394,11 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func receive(_ event: [String: Any]) {
         switch event["type"] as? String {
         case "log": appendLog(event["text"] as? String ?? "")
+        case "capture_preflight": capturePreflightPassed = event["status"] as? String == "validated"
         case "step":
             stepTitle.stringValue = event["title"] as? String ?? "当前步骤"
-            instruction.stringValue = event["instruction"] as? String ?? ""
+            let detail = event["instruction"] as? String ?? ""
+            instruction.stringValue = activeMode == "capture" ? "本轮：\(targetRoom.stringValue) · \(targetName.stringValue)\n" + detail : detail
         case "prompt":
             clearPrompt(); pendingPrompt = event["id"] as? String
             promptText.stringValue = event["text"] as? String ?? "按提示选择"
@@ -359,6 +422,9 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
         case "result":
             lastCaptureStatus = event["capture_status"] as? String
+            if event["report_kind"] as? String == "collection", let summary = event["summary"] as? [String: Any] {
+                lastCollectionFailedCount = (summary["failed_count"] as? NSNumber)?.intValue ?? 0
+            }
             if let path = event["report_dir"] as? String {
                 lastReport = URL(fileURLWithPath: path, isDirectory: true)
                 reloadReports(); tabs.selectedSegment = 3; changePage()
@@ -376,6 +442,9 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             promptText.stringValue = ""; clearPrompt()
             status.stringValue = ok ? "处理完成。报告和原始数据只保存在本机。" :
                 lastError.isEmpty ? "任务已停止。请查看保留报告及清理记录。" : lastError
+            if ok && lastCollectionFailedCount > 0 {
+                status.stringValue = "汇总文件已生成，但有\(lastCollectionFailedCount)轮失败；请逐轮查看缺口，不能视为采样或对准通过。"
+            }
         default: appendLog("未知工具事件已忽略。")
         }
     }
@@ -404,6 +473,16 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func workerEnded(_ code: Int32) {
         inputPipe?.fileHandleForWriting.closeFile(); inputPipe = nil; worker = nil
+        captureContents?.isHidden = false
+        if activeMode == "capture", capturePreflightPassed,
+           (!finishedEvent || lastCaptureStatus == nil || lastCaptureStatus == "cleanup_incomplete") {
+            captureCleanupUncertain = true
+        }
+        if activeMode == "capture", activeCaptureKey == baselineKey,
+           lastFinishedOK, lastCaptureStatus == "completed" {
+            baselineHasCompleteReport = true; baselineReview.isEnabled = true
+        }
+        activeCaptureKey = nil
         stopButton.isEnabled = false; progress.stopAnimation(nil); progress.isIndeterminate = false
         clearPrompt()
         if !finishedEvent {
@@ -428,7 +507,7 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let children = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.isSymbolicLinkKey])) ?? []
             reportDirectories = children.filter { url in
                 let linked = (try? url.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) ?? true
-                return !linked && FileManager.default.fileExists(atPath: url.appendingPathComponent("report.json").path)
+                return !linked && (FileManager.default.fileExists(atPath: url.appendingPathComponent("report.json").path) || FileManager.default.fileExists(atPath: url.appendingPathComponent("collection.json").path))
             }.sorted { $0.lastPathComponent > $1.lastPathComponent }
         }
         reportPicker.removeAllItems()
@@ -453,12 +532,51 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let labels = ["limited": "存在限制", "reviewable": "可供人工复核", "blocked": "受阻", "pass": "通过", "warn": "需注意", "fail": "未通过", "recorded": "记录完整", "completed": "记录完成", "partial": "部分记录", "skipped": "已跳过", "incomplete": "不完整"]
         return labels[text(value)] ?? text(value)
     }
+
+    private func showCollection(_ directory: URL) {
+        let url = directory.appendingPathComponent("collection.json")
+        guard let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize, size <= 16 * 1024 * 1024,
+              let data = try? Data(contentsOf: url), let report = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            reportText.string = "多轮汇总不可读或超过16MiB。请在Finder查看完整文件。"; return
+        }
+        let summary = report["summary"] as? [String: Any] ?? [:]
+        let quality = report["quality"] as? [String: Any] ?? [:]
+        var lines = [report["simulation"] as? Bool == true ? "多轮合成演示 · 不是住户通信" : "私有多轮样本汇总 · 来源须逐轮核对",
+            "首组先人工核对，再扩展同类普通灯。汇总不会确认设备身份或自动生成HA设置。",
+            "原始样本、标签、完整标识和报告只存本机，不发群或公开GitHub。", "",
+            "样本轮次：\(text(summary["round_count"]))；分析成功：\(text(summary["analyzed_count"]))；失败：\(text(summary["failed_count"]))",
+            "状态：\(evidenceStatus(quality["level"]))；明文帧：\(text(summary["frame_count"]))；跨轮重复标识：\(text(summary["identifier_collision_count"]))", ""]
+        for warning in quality["warnings"] as? [String] ?? [] { lines.append("• " + warning) }
+        for row in (report["rounds"] as? [[String: Any]] ?? []).prefix(32) {
+            let target = row["target_context"] as? [String: Any] ?? [:]
+            let metrics = row["summary"] as? [String: Any] ?? [:]
+            let steps = row["steps"] as? [String: Any] ?? [:]
+            let status = row["status"] as? String == "analyzed" ? "已分析，仍需人工核对" : "失败，保留缺口"
+            lines += ["\n\(text(row["round_id"])) · \(text(target["room"])) · \(text(target["label"]))",
+                "  业主标签与普通灯类型声明均未验证；\(status)",
+                "  核心步骤：\(text(steps["complete_required_count"]))/\(text(steps["required_count"]))；帧：\(text(metrics["frame_count"]))；候选：\(text(metrics["device_count"]))"]
+            for gap in row["gaps"] as? [String] ?? [] { lines.append("  • " + gap) }
+            if let error = row["error"] as? String { lines.append("  错误：" + error) }
+            for device in row["device_candidates"] as? [[String: Any]] ?? [] {
+                lines.append("  候选 \(text(device["identifier_hex"]))：App开\(text(device["command_on_count"])) / 关\(text(device["command_off_count"]))；面板状态窗口：\(text(device["panel_state_windows"]))；重进App：\(text(device["reopen_state_windows"]))")
+            }
+        }
+        lines += ["", "跨轮相同字节只提示冲突，不认作同一物理灯，也不证明是两个已知实体。"]
+        for collision in report["identifier_collisions"] as? [[String: Any]] ?? [] {
+            lines.append("• 标识 \(text(collision["identifier_hex"])) 在多轮出现，需人工逐包复核。")
+        }
+        lines += ["", "完整逐轮报告见Finder；认证、类型、独立物理状态和HA实机控制仍待验证。"]
+        reportText.string = lines.joined(separator: "\n"); reportText.scrollToBeginningOfDocument(nil)
+    }
     @objc private func selectReport() {
         let index = reportPicker.indexOfSelectedItem
         guard index >= 0 && index < reportDirectories.count else {
             reportText.string = "尚无本机报告。请先运行演示，或选择已有采样文件夹分析。"; return
         }
         let directory = reportDirectories[index]
+        if FileManager.default.fileExists(atPath: directory.appendingPathComponent("collection.json").path) {
+            showCollection(directory); return
+        }
         let url = directory.appendingPathComponent("report.json")
         guard let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize, size <= 16 * 1024 * 1024,
               let data = try? Data(contentsOf: url), let report = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
@@ -470,6 +588,9 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         var lines = [synthetic == true ? "合成演示 · 不是住户通信" : synthetic == false ? "住户采样声明 · 尚未经身份核验" : "样本来源未知",
             "私有报告，不上传到公开仓库或业主群。", "Home Assistant 实机接入：待人工验证。", "",
             "样本质量：\(evidenceStatus(quality["level"]))", "包：\(text(metrics["packet_count"]))    目标主机包：\(text(metrics["target_packet_count"]))    明文帧：\(text(metrics["frame_count"]))    设备候选：\(text(metrics["device_count"]))", "", "质量检查"]
+        if let target = report["target_context"] as? [String: Any] {
+            lines.insert("本轮业主标签：\(text(target["room"])) · \(text(target["label"]))（身份和设备类型未验证）", at: 3)
+        }
         for row in quality["checks"] as? [[String: Any]] ?? [] { lines.append("• \(text(row["name"]))：\(evidenceStatus(row["status"])) · \(evidenceStatus(row["detail"]))") }
         for warning in quality["warnings"] as? [String] ?? [] { lines.append("• 注意：" + warning) }
         lines += ["", "动作时间线", "实际动作只位于准备至确认区间；时间邻近不证明因果，ACK不是状态。"]
@@ -490,7 +611,9 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc private func revealReport() {
         let index = reportPicker.indexOfSelectedItem
         guard index >= 0 && index < reportDirectories.count else { return }
-        NSWorkspace.shared.activateFileViewerSelecting([reportDirectories[index].appendingPathComponent("报告.html")])
+        let directory = reportDirectories[index]
+        let name = FileManager.default.fileExists(atPath: directory.appendingPathComponent("collection.html").path) ? "collection.html" : "报告.html"
+        NSWorkspace.shared.activateFileViewerSelecting([directory.appendingPathComponent(name)])
     }
 
     private func alert(_ title: String, _ message: String) {

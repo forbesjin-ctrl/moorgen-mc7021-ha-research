@@ -22,9 +22,10 @@ import subprocess
 import sys
 import threading
 import time
+import unicodedata
 import uuid
 
-VERSION = '0.2.0-community'
+VERSION = '0.4.0-community'
 OUTPUTS = Path(__file__).resolve().parents[1]
 SHANGHAI = timezone(timedelta(hours=8), 'Asia/Shanghai')
 RVICTL = '/Library/Apple/usr/bin/rvictl'
@@ -89,6 +90,45 @@ def validate_udid(value):
     if not value.replace('-', '').strip('0'):
         raise ValueError('UDID不能全为0。')
     return value
+
+
+def validate_target_context(value):
+    """Validate private, owner-declared labels without inferring device identity.
+
+    This context groups separate single-light sessions. It is never a protocol
+    address, a verified device type, or evidence that two household devices match.
+    Preserve the supplied strings exactly; make a defensive copy for persistence.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != {'label', 'room', 'kind', 'collection_id'}:
+        raise ValueError('灯光标签必须恰好包含 label、room、kind 和 collection_id。')
+    for key, minimum in (('label', 1), ('room', 0)):
+        text = value[key]
+        if (not isinstance(text, str) or not minimum <= len(text) <= 80
+                or any(unicodedata.category(char).startswith('C')
+                       or char in '\u2028\u2029' for char in text)):
+            raise ValueError('灯光名称须为1至80字，房间须为0至80字，均不能含控制字符或换行。')
+    if not value['label'].strip():
+        raise ValueError('灯光名称不能只含空格。')
+    if value['kind'] != 'ordinary_switch_light':
+        raise ValueError('当前只接受业主声明的普通开关灯标签；标签不验证设备类型。')
+    identifier = value['collection_id']
+    if not isinstance(identifier, str) or not re.fullmatch(
+            r'(?:[0-9a-fA-F]{32}|[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})',
+            identifier):
+        raise ValueError('collection_id 必须为 UUID 或32位十六进制，仅用于本机分轮整理。')
+    return dict(value)
+
+
+def build_target_context(label=None, room=None, collection_id=None):
+    """Build optional CLI/GUI context; legacy callers remain entirely unlabeled."""
+    if label is None and room is None and collection_id is None:
+        return None
+    if label is None:
+        raise ValueError('填写房间或采样批次时，也需填写本轮灯光名称。')
+    return validate_target_context(dict(label=label, room='' if room is None else room,
+        kind='ordinary_switch_light', collection_id=uuid.uuid4().hex if collection_id is None else collection_id))
 
 
 def capture_filter(ip):
@@ -374,7 +414,8 @@ class DemoBackend:
 
 class GuidedSession:
     def __init__(self, ip, udid, journal, backend, input_fn=input, sleep_fn=time.sleep,
-                 sample_origin='external_owner_household'):
+                 sample_origin='external_owner_household', target_context=None):
+        target_context = validate_target_context(target_context)
         self.ip, self.udid = validate_ip(ip), validate_udid(udid)
         self.journal, self.backend = journal, backend
         self.input, self.sleep = input_fn, sleep_fn
@@ -396,7 +437,13 @@ class GuidedSession:
             household_live_validation_performed=False,
             sample_origin=sample_origin, project_household_verified=False,
             action_timestamp_semantics='actual action is user-reported within ready_at..confirmed_at; not exact instrumented action time')
+        if target_context is not None:
+            self.metadata['target_context'] = target_context
         self.journal.save_summary(self.metadata)
+        if target_context is not None:
+            self.journal.record('target_context_declared', target_context=dict(target_context),
+                evidence='private owner-declared labels; not protocol identity or verified device type',
+                device_identity_verified=False, device_type_verified=False)
 
     def signal_handler(self, number, frame):
         if self.cleaning:
@@ -698,7 +745,14 @@ def main(argv=None):
     parser.add_argument('--analyze-after', action='store_true', help='write a private offline report after cleanup')
     parser.add_argument('--peer-owner', action='store_true',
                         help='label this as another owner household; never project-home evidence')
+    parser.add_argument('--target-label', help='private owner-declared label for this one ordinary light')
+    parser.add_argument('--room-label', help='optional private room label; requires --target-label')
+    parser.add_argument('--collection-id', help='private UUID or 32-hex group for separate single-light sessions; requires --target-label')
     args = parser.parse_args(argv)
+    try:
+        target_context = build_target_context(args.target_label, args.room_label, args.collection_id)
+    except ValueError as error:
+        parser.error(str(error))
     os.umask(0o077)
     print('MC7021 单组普通灯采样  v{}\n只记录已知主机IP的双向TCP/UDP；不扫描、不发研究命令、不改设备/路由配置。'.format(VERSION), flush=True)
     print('iPhone接USB、解锁并信任Mac，沿用现有正常Wi-Fi/本地控制。先划掉摩根App，不退出账号。\n输入q或Control+C可结束；过程中按数字记录你实际看到的状态。', flush=True)
@@ -715,7 +769,7 @@ def main(argv=None):
     parent = OUTPUTS / 'demo_runs' if args.demo else OUTPUTS / 'captures'
     journal = Journal(parent, args.demo)
     session = GuidedSession(ip, udid, journal, backend,
-        sample_origin='external_owner_household')
+        sample_origin='external_owner_household', target_context=target_context)
     previous = {}
     try:
         for number in (signal.SIGINT, signal.SIGHUP, signal.SIGTERM):

@@ -46,10 +46,10 @@ for _artifact in list(RUNTIMES.values()) + [LICENSE_ARCHIVE]:
 TOOL_FILES = (
     'gui_worker.py', 'gui_capture_backend.py', 'capture_mc7021_light.py', 'analyze_capture.py',
     'demo_sample.py', 'offline_shcp.py', 'pcap_reader.py', 'report_view.py',
-    'light_state_model.py', 'research_tool.py',
+    'light_state_model.py', 'research_tool.py', 'collection_report.py',
 )
 DOCUMENT_FILES = (
-    'MAC_APP_BUILD.md', 'MAC_GUI.md', 'CAPTURE.md', 'AFTER_CAPTURE.md', 'PRIVATE_SAMPLES.md',
+    'MAC_APP_BUILD.md', 'MAC_GUI.md', 'CAPTURE.md', 'AFTER_CAPTURE.md', 'PRIVATE_SAMPLES.md', 'MULTI_DEVICE.md',
 )
 MAX_RUNTIME_BYTES = 250 * 1024 * 1024
 MACHO_MAGICS = (b'\xcf\xfa\xed\xfe', b'\xce\xfa\xed\xfe', b'\xca\xfe\xba\xbe',
@@ -327,7 +327,7 @@ def main(argv=None):
     parser.add_argument('--arm64-archive', type=Path, required=True)
     parser.add_argument('--x86_64-archive', type=Path, required=True)
     parser.add_argument('--licenses-archive', type=Path, required=True)
-    parser.add_argument('--version', default='0.3.0')
+    parser.add_argument('--version', default='0.4.0')
     args = parser.parse_args(argv)
     try:
         return build(args)
