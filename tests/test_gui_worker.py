@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import socket
 import sys
 import tempfile
 import unittest
@@ -112,6 +113,32 @@ class WorkerTests(unittest.TestCase):
     def capture_args(self):
         return self.args('capture', '--host-ip', IP, '--udid', UDID)
 
+    def form_file(self, **updates):
+        form = dict(decisions={}, notes={}, selected_identifier='', reviewer_label='')
+        form.update(updates)
+        path = self.root / 'data/private_reviews/forms/owner_form.json'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(form, ensure_ascii=False), encoding='utf-8')
+        return path
+
+    def review_fixture(self, declared_real=False):
+        """Exercise declarations only: every packet and observation stays synthetic."""
+        data = self.root / 'data'
+        directory = worker.demo.create_demo_sample(data / 'captures')
+        if declared_real:
+            metadata_path = directory / 'session.json'
+            metadata = json.loads(metadata_path.read_text())
+            metadata.update(simulation=False, script_version='test_real_declaration',
+                            sample_origin='test_operator_declaration')
+            metadata_path.write_text(json.dumps(metadata), encoding='utf-8')
+            event_path = directory / 'events.jsonl'
+            rows = [json.loads(line) for line in event_path.read_text().splitlines()]
+            for row in rows:
+                row['simulation'] = False
+            event_path.write_text(''.join(json.dumps(row) + '\n' for row in rows), encoding='utf-8')
+        destination, report = worker.analyze_session(directory, data / 'private_reports')
+        return directory, destination, report
+
     def fake_analysis(self, directory, output_root=None, ordinary_ids=()):
         self.assertTrue((directory / 'session.json').is_file())
         destination = output_root / 'analysis_test'
@@ -149,6 +176,352 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(analyze.call_args.kwargs['ordinary_ids'], ())
         self.assertEqual(analyze.call_args.kwargs['output_root'], self.root / 'data/private_reports')
         self.assertEqual(events(output)[-1]['type'], 'finished')
+
+    def test_result_has_baseline_assessment_draft_and_private_source_context(self):
+        protocol, output = self.protocol()
+        self.assertEqual(worker.run(self.args('demo'), protocol), 0, output.getvalue())
+        result = next(row for row in events(output) if row['type'] == 'result')
+        report = json.loads((Path(result['report_dir']) / 'report.json').read_text())
+        self.assertEqual(result['source'], report['source'])
+        self.assertEqual(result['target_context'], report['target_context'])
+        self.assertEqual(result['baseline_assessment'], worker.reviews.assess_report(report))
+        self.assertEqual(result['review_draft'], worker.reviews.draft_review(report))
+        self.assertFalse(result['baseline_assessment'].get('passed', False))
+
+    def test_review_form_rejects_outside_selected_data_directory(self):
+        outside = self.root / 'outside.json'
+        outside.write_text('{}')
+        with self.assertRaises(worker.WorkerError):
+            worker.load_review_form(outside, self.root / 'data')
+
+    def test_review_form_rejects_symlink_file_and_parent(self):
+        path = self.form_file()
+        symlink = path.with_name('link.json')
+        symlink.symlink_to(path)
+        with self.assertRaises(worker.WorkerError):
+            worker.load_review_form(symlink, self.root / 'data')
+        parent_link = self.root / 'data/linked_forms'
+        parent_link.symlink_to(path.parent, target_is_directory=True)
+        with self.assertRaises(worker.WorkerError):
+            worker.load_review_form(parent_link / path.name, self.root / 'data')
+
+    def test_review_form_requires_exact_fields_types_and_unique_json_keys(self):
+        invalid = ['[]', '{}', '{"decisions":{},"decisions":{},"notes":{},'
+                   '"selected_identifier":"","reviewer_label":""}',
+                   '{"decisions":{},"notes":{},"selected_identifier":"",'
+                   '"reviewer_label":"","extra":true}',
+                   '{"decisions":[],"notes":{},"selected_identifier":"","reviewer_label":""}',
+                   '{"decisions":{},"notes":{},"selected_identifier":null,"reviewer_label":""}',
+                   '{"decisions":{},"notes":{},"selected_identifier":"","reviewer_label":NaN}']
+        path = self.form_file()
+        for payload in invalid:
+            with self.subTest(payload=payload):
+                path.write_text(payload)
+                with self.assertRaises(worker.WorkerError):
+                    worker.load_review_form(path, self.root / 'data')
+
+    def test_review_form_rejects_oversize_and_non_regular_file(self):
+        path = self.form_file()
+        path.write_bytes(b' ' * (worker.MAX_REVIEW_FORM_BYTES + 1))
+        with self.assertRaises(worker.WorkerError):
+            worker.load_review_form(path, self.root / 'data')
+        with self.assertRaises(worker.WorkerError):
+            worker.load_review_form(path.parent, self.root / 'data')
+
+    def test_review_save_pending_record_is_saved_but_does_not_report_pass(self):
+        path = self.form_file(notes=dict(evidence='待离线检查'))
+        record_path = self.root / 'data/private_reviews/pending.json'
+        record = dict(status='pending', passed=False)
+        validation = dict(valid=True, passed=False, errors=[], record=record, assessment={})
+        protocol, output = self.protocol()
+        factory = mock.Mock(side_effect=AssertionError('No capture backend during review save'))
+        with mock.patch.object(worker.reviews, 'save_review', return_value=(record_path, record)) as save, \
+                mock.patch.object(worker.reviews, 'validate_review', return_value=validation) as validate:
+            code = worker.run(self.args('review-save', '--report-dir', str(self.root / 'reports'),
+                '--session-dir', str(self.root / 'samples'), '--form-file', str(path)), protocol,
+                backend_factory=factory)
+        self.assertEqual(code, 0, output.getvalue())
+        factory.assert_not_called()
+        self.assertEqual(save.call_args.kwargs['notes'], dict(evidence='待离线检查'))
+        validate.assert_called_once_with(record_path, self.root / 'data')
+        rows = events(output)
+        saved = next(row for row in rows if row['type'] == 'review_saved')
+        self.assertFalse(saved['passed'])
+        self.assertEqual(saved['validation'], validation)
+        self.assertEqual(rows[-1], dict(type='finished', ok=True))
+
+    def test_synthetic_review_can_save_pending_and_restore_but_never_unlock(self):
+        directory, destination, report = self.review_fixture()
+        form = self.form_file(**worker.reviews.draft_review(report))
+        protocol, output = self.protocol()
+        self.assertEqual(worker.run(self.args('review-save', '--report-dir', str(destination),
+            '--session-dir', str(directory), '--form-file', str(form)), protocol), 0,
+            output.getvalue())
+        saved = next(row for row in events(output) if row['type'] == 'review_saved')
+        self.assertTrue(saved['validation']['valid'])
+        self.assertFalse(saved['passed'])
+        self.assertFalse(saved['record']['physical_feedback_verified'])
+        self.assertFalse(saved['record']['can_start_live_ha'])
+        protocol, output = self.protocol()
+        self.assertEqual(worker.run(self.args('review-list'), protocol), 0, output.getvalue())
+        loaded = next(row for row in events(output) if row['type'] == 'review-list')['records']
+        self.assertEqual(len(loaded), 1)
+        self.assertEqual(loaded[0]['review_file'], saved['record_path'])
+        self.assertTrue(loaded[0]['valid'])
+        self.assertFalse(loaded[0]['passed'])
+        protocol, output = self.protocol()
+        factory = mock.Mock(side_effect=AssertionError('Synthetic pending record cannot unlock capture'))
+        self.assertEqual(worker.run(self.capture_args() + ['--review-file', saved['record_path']], protocol,
+            backend_factory=factory), 1, output.getvalue())
+        factory.assert_not_called()
+
+    def test_declared_real_fixture_human_pass_is_bound_to_original_hashes(self):
+        # This deliberately exercises operator declarations using generated
+        # documentation-address packets; no real physical result is asserted.
+        directory, destination, report = self.review_fixture(declared_real=True)
+        self.assertTrue(worker.reviews.assess_report(report)['eligible_for_manual_review'])
+        form = worker.reviews.draft_review(report)
+        form['decisions'] = {key: 'pass' for key in worker.reviews.CRITERION_IDS}
+        form['notes'] = {key: '合成测试声明：核对候选帧及现场记录，仅测试代码路径。'
+                         for key in worker.reviews.CRITERION_IDS}
+        form['selected_identifier'] = worker.demo.DEVICE.hex()
+        form['reviewer_label'] = '合成测试复核人'
+        form_path = self.form_file(**form)
+        before = {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in directory.iterdir()}
+        protocol, output = self.protocol()
+        factory = mock.Mock(side_effect=AssertionError('Review save must stay offline'))
+        self.assertEqual(worker.run(self.args('review-save', '--report-dir', str(destination),
+            '--session-dir', str(directory), '--form-file', str(form_path)), protocol,
+            backend_factory=factory), 0, output.getvalue())
+        factory.assert_not_called()
+        saved = next(row for row in events(output) if row['type'] == 'review_saved')
+        self.assertTrue(saved['passed'])
+        self.assertTrue(saved['validation']['valid'])
+        self.assertFalse(saved['record']['physical_feedback_verified'])
+        self.assertEqual(before, {path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+                                 for path in directory.iterdir()})
+        protocol, output = self.protocol()
+        self.assertEqual(worker.run(self.args('review-validate', '--review-file', saved['record_path'],
+            '--host-ip', '192.0.2.21'), protocol, backend_factory=factory), 0, output.getvalue())
+        checked = next(row for row in events(output) if row['type'] == 'review_validation')
+        self.assertFalse(checked['valid'])
+        self.assertFalse(checked['passed'])
+        # Any original-file edit makes the prior human declaration unusable.
+        with (directory / 'events.jsonl').open('a', encoding='utf-8') as stream:
+            stream.write('{"event":"synthetic_after_review_change"}\n')
+        protocol, output = self.protocol()
+        self.assertEqual(worker.run(self.args('review-validate', '--review-file', saved['record_path'],
+            '--host-ip', IP), protocol, backend_factory=factory), 0, output.getvalue())
+        checked = next(row for row in events(output) if row['type'] == 'review_validation')
+        self.assertFalse(checked['valid'])
+        self.assertFalse(checked['passed'])
+        protocol, output = self.protocol()
+        self.assertEqual(worker.run(self.capture_args() + ['--review-file', saved['record_path']], protocol,
+            backend_factory=factory), 1, output.getvalue())
+        self.assertFalse(any(row['type'] == 'capture_preflight' for row in events(output)))
+        factory.assert_not_called()
+
+    def test_synthetic_all_pass_decisions_report_error_and_never_saved_pass(self):
+        directory, destination, report = self.review_fixture()
+        form = worker.reviews.draft_review(report)
+        form['decisions'] = {key: 'pass' for key in worker.reviews.CRITERION_IDS}
+        form['notes'] = {key: '合成测试尝试通过，预期拒绝。' for key in worker.reviews.CRITERION_IDS}
+        form['selected_identifier'] = worker.demo.DEVICE.hex()
+        form_path = self.form_file(**form)
+        protocol, output = self.protocol()
+        self.assertEqual(worker.run(self.args('review-save', '--report-dir', str(destination),
+            '--session-dir', str(directory), '--form-file', str(form_path)), protocol), 1,
+            output.getvalue())
+        self.assertTrue(any(row['type'] == 'error' for row in events(output)))
+        self.assertFalse(any(row['type'] == 'review_saved' for row in events(output)))
+        self.assertFalse((self.root / 'data/baseline_reviews').exists())
+        self.assertEqual(events(output)[-1], dict(type='finished', ok=False))
+
+    def test_ha_handoff_mode_exports_one_private_research_event_without_backend_or_network(self):
+        directory, destination, report = self.review_fixture(declared_real=True)
+        form = worker.reviews.draft_review(report)
+        form.update(decisions={key: 'pass' for key in worker.reviews.CRITERION_IDS},
+                    notes={key: '合成测试声明：只有代码路径通过，未接触家庭设备。'
+                           for key in worker.reviews.CRITERION_IDS},
+                    selected_identifier=worker.demo.DEVICE.hex())
+        review_file, _ = worker.reviews.save_review(destination, directory, self.root / 'data', **form)
+        protocol, output = self.protocol()
+        factory = mock.Mock(side_effect=AssertionError('No capture backend for HA research export'))
+        with mock.patch.object(socket, 'socket', side_effect=AssertionError('No network')), \
+                mock.patch.object(socket, 'getaddrinfo', side_effect=AssertionError('No DNS')):
+            code = worker.run(self.args('ha-handoff', '--review-file', str(review_file),
+                '--host-ip', IP), protocol, backend_factory=factory)
+        self.assertEqual(code, 0, output.getvalue())
+        factory.assert_not_called()
+        rows = events(output)
+        self.assertEqual(sum(row['type'] == 'ha_handoff' for row in rows), 1)
+        self.assertEqual(sum(row['type'] == 'finished' for row in rows), 1)
+        self.assertFalse(any(row['type'] == 'capture_preflight' for row in rows))
+        result = next(row for row in rows if row['type'] == 'ha_handoff')
+        manifest = result['manifest']
+        self.assertEqual(manifest['stage'], 'integration_research')
+        self.assertTrue(manifest['can_start_integration_work'])
+        self.assertFalse(manifest['live_control_enabled'])
+        self.assertTrue(manifest['private'])
+        self.assertFalse(manifest['identity_authenticated'])
+        self.assertTrue(all(value is None for value in manifest['unresolved_parameters'].values()))
+        self.assertEqual(Path(result['directory']).parent, self.root / 'data/private_ha_handoffs')
+        self.assertTrue((Path(result['directory']) / 'manifest.json').is_file())
+        self.assertFalse(list(Path(result['directory']).rglob('*.pcap')))
+        self.assertNotIn(str(self.root), json.dumps(manifest))
+        self.assertEqual(rows[-1], dict(type='finished', ok=True))
+
+    def test_ha_handoff_mode_rejects_pending_demo_changed_original_and_other_host(self):
+        for reason in ('pending', 'demo', 'changed_original', 'other_host'):
+            with self.subTest(reason=reason):
+                directory, destination, report = self.review_fixture(declared_real=reason != 'demo')
+                form = worker.reviews.draft_review(report)
+                if reason not in ('pending', 'demo'):
+                    form.update(decisions={key: 'pass' for key in worker.reviews.CRITERION_IDS},
+                        notes={key: '合成fixture人工声明，未验证实物。' for key in worker.reviews.CRITERION_IDS},
+                        selected_identifier=worker.demo.DEVICE.hex())
+                review_file, _ = worker.reviews.save_review(destination, directory, self.root / 'data', **form)
+                if reason == 'changed_original':
+                    with (directory / 'events.jsonl').open('a') as stream:
+                        stream.write('{"event":"synthetic_post_review_edit"}\n')
+                protocol, output = self.protocol()
+                factory = mock.Mock(side_effect=AssertionError('Failed HA export must not create capture backend'))
+                with mock.patch.object(socket, 'socket', side_effect=AssertionError('No network')), \
+                        mock.patch.object(socket, 'getaddrinfo', side_effect=AssertionError('No DNS')):
+                    code = worker.run(self.args('ha-handoff', '--review-file', str(review_file),
+                        '--host-ip', '192.0.2.21' if reason == 'other_host' else IP), protocol,
+                        backend_factory=factory)
+                self.assertEqual(code, 1, output.getvalue())
+                factory.assert_not_called()
+                rows = events(output)
+                self.assertTrue(any(row['type'] == 'error' for row in rows))
+                self.assertFalse(any(row['type'] in ('ha_handoff', 'capture_preflight') for row in rows))
+                self.assertEqual(sum(row['type'] == 'finished' for row in rows), 1)
+                self.assertEqual(rows[-1], dict(type='finished', ok=False))
+                self.assertFalse((self.root / 'data/private_ha_handoffs').exists())
+
+    def test_invalid_review_form_stops_before_any_save_or_backend(self):
+        path = self.form_file()
+        path.write_text('{broken')
+        protocol, output = self.protocol()
+        factory = mock.Mock(side_effect=AssertionError('No backend'))
+        with mock.patch.object(worker.reviews, 'save_review') as save:
+            code = worker.run(self.args('review-save', '--report-dir', str(self.root / 'reports'),
+                '--session-dir', str(self.root / 'samples'), '--form-file', str(path)), protocol,
+                backend_factory=factory)
+        self.assertEqual(code, 1)
+        save.assert_not_called()
+        factory.assert_not_called()
+        self.assertFalse(any(row['type'] == 'review_saved' for row in events(output)))
+        self.assertEqual(events(output)[-1], dict(type='finished', ok=False))
+
+    def test_review_list_and_validate_are_local_events_without_backend(self):
+        record_path = self.root / 'data/private_reviews/verified.json'
+        validation = dict(valid=True, passed=False, errors=[], record=dict(status='pending'), assessment={})
+        listed = [dict(review_file=str(record_path), **validation)]
+        factory = mock.Mock(side_effect=AssertionError('No capture backend in review commands'))
+        protocol, output = self.protocol()
+        with mock.patch.object(worker.reviews, 'load_reviews', return_value=listed) as load:
+            self.assertEqual(worker.run(self.args('review-list', '--host-ip', IP), protocol,
+                backend_factory=factory), 0, output.getvalue())
+        load.assert_called_once_with(self.root / 'data', expected_host=IP)
+        self.assertEqual(events(output)[0], dict(type='review-list',
+                                               records=[worker.review_summary(item) for item in listed]))
+        protocol, output = self.protocol()
+        with mock.patch.object(worker.reviews, 'validate_review', return_value=validation) as validate:
+            self.assertEqual(worker.run(self.args('review-validate', '--review-file', str(record_path)),
+                protocol, backend_factory=factory), 0, output.getvalue())
+        validate.assert_called_once_with(record_path, self.root / 'data', expected_host=None)
+        self.assertEqual(events(output)[0], dict(type='review_validation', review_file=str(record_path),
+                                               **validation))
+        self.assertFalse(events(output)[0]['passed'])
+        self.assertEqual(events(output)[-1], dict(type='finished', ok=True))
+        factory.assert_not_called()
+
+    def test_review_list_is_compact_and_never_promotes_invalid_pass(self):
+        validation = dict(review_file='/synthetic/review.json', valid=False, passed=True,
+            errors=['synthetic failure'], record=dict(review_id='test', host_ip=IP,
+                target_context=dict(label='合成测试灯', room='合成房间', kind='ordinary_switch_light',
+                                    collection_id='0' * 32, ignored='x' * 100000),
+                created_at='test timestamp', notes={'large': 'x' * 100000}),
+            assessment=dict(eligible_for_manual_review=False, confirmed=['x' * 100000],
+                            pending=['x' * 100000], resample=['x' * 100000],
+                            candidate_evidence=['x' * 100000]))
+        summary = worker.review_summary(validation)
+        self.assertFalse(summary['passed'])
+        self.assertEqual(summary['assessment'], dict(eligible_for_manual_review=False,
+                                                   confirmed_count=1, pending_count=1, resample_count=1))
+        self.assertNotIn('notes', summary['record'])
+        self.assertLess(len(json.dumps(summary)), 4096)
+
+    def test_invalid_host_for_review_commands_stops_before_review_read(self):
+        for mode, extra in [('review-list', []),
+                            ('review-validate', ['--review-file', str(self.root / 'review.json')])]:
+            with self.subTest(mode=mode):
+                protocol, output = self.protocol()
+                with mock.patch.object(worker.reviews, 'load_reviews') as load, \
+                        mock.patch.object(worker.reviews, 'validate_review') as validate:
+                    self.assertEqual(worker.run(self.args(mode, '--host-ip', 'example.invalid', *extra),
+                        protocol), 1, output.getvalue())
+                load.assert_not_called()
+                validate.assert_not_called()
+                self.assertEqual(events(output)[-1], dict(type='finished', ok=False))
+
+    def test_invalid_or_pending_review_never_constructs_backend_or_emits_preflight(self):
+        for valid, passed in [(False, False), (True, False), (False, True)]:
+            with self.subTest(valid=valid, passed=passed):
+                protocol, output = self.protocol()
+                factory = mock.Mock(side_effect=AssertionError('Invalid review must stop before backend'))
+                validation = dict(valid=valid, passed=passed, errors=['synthetic mismatch'])
+                with mock.patch.object(worker.reviews, 'validate_review', return_value=validation) as validate:
+                    self.assertEqual(worker.run(self.capture_args() + ['--review-file',
+                        str(self.root / 'record.json')], protocol, backend_factory=factory), 1,
+                        output.getvalue())
+                validate.assert_called_once_with(self.root / 'record.json', self.root / 'data', expected_host=IP)
+                factory.assert_not_called()
+                self.assertFalse((self.root / 'data/captures').exists())
+                self.assertFalse(any(row['type'] == 'capture_preflight' for row in events(output)))
+                self.assertEqual(events(output)[-1], dict(type='finished', ok=False))
+
+    def test_passed_review_is_revalidated_for_current_host_and_reference_recorded(self):
+        protocol, output = self.protocol(['', ''])
+        backend = FakeBackend()
+        review_path = self.root / 'review.json'
+        validation = dict(valid=True, passed=True, record=dict(review_id='synthetic-review'))
+        def analyze(directory, output_root=None, ordinary_ids=()):
+            rows = [json.loads(line) for line in (directory / 'events.jsonl').read_text().splitlines()]
+            reference = next(row for row in rows if row['event'] == 'baseline_review_reference')
+            self.assertEqual(reference['review_file'], str(review_path))
+            self.assertEqual(reference['review_id'], 'synthetic-review')
+            self.assertTrue(reference['human_review_passed'])
+            self.assertFalse(reference['physical_identity_verified_by_tool'])
+            self.assertFalse(reference['independent_state_verified_by_tool'])
+            return self.fake_analysis(directory, output_root, ordinary_ids)
+        with mock.patch.object(worker.reviews, 'validate_review', return_value=validation) as validate, \
+                mock.patch.object(worker.GuiGuidedSession, 'flow', lambda session: self.short_flow(session)), \
+                mock.patch.object(worker, 'analyze_session', side_effect=analyze):
+            self.assertEqual(worker.run(self.capture_args() + ['--review-file', str(review_path)], protocol,
+                backend_factory=lambda: backend), 0, output.getvalue())
+        validate.assert_called_once_with(review_path, self.root / 'data', expected_host=IP)
+        self.assertTrue(backend.capture.stopped)
+        self.assertEqual(events(output)[-1], dict(type='finished', ok=True))
+
+    def test_legacy_baseline_boolean_is_only_unverified_declaration(self):
+        protocol, output = self.protocol(['', ''])
+        backend = FakeBackend()
+        def analyze(directory, output_root=None, ordinary_ids=()):
+            rows = [json.loads(line) for line in (directory / 'events.jsonl').read_text().splitlines()]
+            declaration = next(row for row in rows if row['event'] == 'baseline_review_declared')
+            self.assertFalse(declaration['unlocks_additional_sampling'])
+            self.assertFalse(any(row['event'] == 'baseline_review_reference' for row in rows))
+            return self.fake_analysis(directory, output_root, ordinary_ids)
+        with mock.patch.object(worker.reviews, 'validate_review') as validate, \
+                mock.patch.object(worker.GuiGuidedSession, 'flow', lambda session: self.short_flow(session)), \
+                mock.patch.object(worker, 'analyze_session', side_effect=analyze):
+            self.assertEqual(worker.run(self.capture_args() + ['--baseline-reviewed'], protocol,
+                backend_factory=lambda: backend), 0, output.getvalue())
+        validate.assert_not_called()
+        self.assertEqual(events(output)[-1], dict(type='finished', ok=True))
 
     def test_collection_demo_is_two_explicit_synthetic_rounds_without_backend_or_admin(self):
         protocol, output = self.protocol()

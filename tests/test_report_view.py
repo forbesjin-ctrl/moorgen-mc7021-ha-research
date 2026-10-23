@@ -51,6 +51,16 @@ def report_fixture(value='合成测试灯'):
     }
 
 
+def baseline_fixture(value='文件结构事实'):
+    return {
+        'schema_version': '0.5.0', 'artifact': 'first_light_baseline_assessment',
+        'confirmed': [value], 'pending': [value], 'resample': [value],
+        'criteria': [{'id': value, 'title': value, 'machine_status': 'ready',
+                      'evidence': [value], 'manual_required': True}],
+        'eligible_for_manual_review': False, 'passed': False, 'blockers': [value],
+    }
+
+
 class ReportViewTests(unittest.TestCase):
     def test_complete_chinese_utf8_document(self):
         html = view.render_report(report_fixture())
@@ -168,6 +178,68 @@ class ReportViewTests(unittest.TestCase):
         html = view.render_report(report)
         self.assertIn('人工声明，尚未验证', html)
         self.assertNotIn('输入标记：普通灯已确认', html)
+
+    def test_baseline_is_prominent_and_splits_file_facts_from_interpretations(self):
+        report = report_fixture()
+        report['baseline_assessment'] = baseline_fixture()
+        html = view.render_report(report)
+        self.assertLess(html.index('id="baseline"'), html.index('id="quality"'))
+        for label in ['已确认', '待验证', '需补采', '仅限机器检查到的文件与记录结构事实',
+                      '协议候选及与实际灯路的对应关系', '逐项人工必需核对',
+                      '必须由人工逐项确认，并记录依据', '证据与引用（私有）',
+                      '人工通过是本轮证据的复核声明']:
+            self.assertIn(label, html)
+        self.assertIn('首组核对：尚未人工确认', html)
+        self.assertIn('ACK 不能作为状态反馈', html)
+
+    def test_baseline_untrusted_text_is_escaped_in_all_lists_and_criteria(self):
+        payload = '<script>alert("baseline")</script><img src=x onerror=alert(1)>&'
+        report = report_fixture()
+        report['baseline_assessment'] = baseline_fixture(payload)
+        html = view.render_report(report)
+        self.assertNotIn(payload, html)
+        self.assertGreaterEqual(html.count(escape(payload, quote=True)), 6)
+        tags = Tags()
+        tags.feed(html)
+        self.assertFalse({'script', 'img'} & {tag for tag, _ in tags.tags})
+        self.assertFalse(any(key.startswith('on') for _, attrs in tags.tags for key in attrs))
+
+    def test_legacy_or_malformed_baseline_remains_unknown(self):
+        for value in [None, {}, 'wrong', {'artifact': 'unknown'}]:
+            with self.subTest(assessment=value):
+                report = report_fixture()
+                report['baseline_assessment'] = value
+                html = view.render_report(report)
+                self.assertIn('首组核对：未知，尚未人工确认', html)
+                self.assertIn('缺少字段不能视为通过', html)
+                self.assertNotIn('首组核对：通过', html)
+
+    def test_baseline_forged_pass_and_simulation_never_unlock_or_approve_ha(self):
+        report = report_fixture()
+        report['baseline_assessment'] = baseline_fixture()
+        report['baseline_assessment'].update(passed=True, eligible_for_manual_review=True)
+        html = view.render_report(report)
+        self.assertIn('合成演练只能体验核对流程', html)
+        self.assertIn('不能解锁其他灯采样', html)
+        self.assertNotIn('首组核对：通过', html)
+        self.assertNotIn('尚未人工确认 · 可进入逐项人工核对', html)
+        self.assertIn('Home Assistant 接入：待人工验证', html)
+        report['simulation'] = False
+        html = view.render_report(report)
+        self.assertIn('尚未人工确认 · 可进入逐项人工核对', html)
+        self.assertIn('本页是静态报告，不提供确认按钮', html)
+        self.assertNotIn('首组核对：通过', html)
+
+    def test_missing_or_malformed_criteria_cannot_look_complete(self):
+        report = report_fixture()
+        report['baseline_assessment'] = baseline_fixture()
+        report['baseline_assessment']['criteria'] = []
+        html = view.render_report(report)
+        self.assertIn('缺少逐项核对项目', html)
+        report['baseline_assessment']['criteria'] = [None, {'machine_status': []}]
+        html = view.render_report(report)
+        self.assertIn('未提供可复核证据，不能视为通过', html)
+        self.assertIn('必须由人工逐项确认', html)
 
 
 if __name__ == '__main__':

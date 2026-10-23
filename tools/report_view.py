@@ -84,6 +84,57 @@ def _table(headings, rows, empty):
             + '</tbody></table></div>')
 
 
+def _baseline(report):
+    assessment = _mapping(report.get('baseline_assessment'))
+    current = assessment.get('artifact') == 'first_light_baseline_assessment'
+    if not current:
+        return ('<section id="baseline"><h2><span>首组</span>首组报文核对</h2>'
+                '<div class="ha-state"><strong>首组核对：未知，尚未人工确认</strong>'
+                '<p>此报告缺少首组自动核对字段，可能由旧版工具生成。请用新版重新分析同一份原件；'
+                '缺少字段不能视为通过，也不能据此引导采其他灯。</p></div></section>')
+    # A saved report is untrusted input. In particular its passed flag must not
+    # turn this read-only rendering into approval of a physical correspondence.
+    eligible = (report.get('simulation') is False
+                and assessment.get('eligible_for_manual_review') is True)
+    heading = '可进入逐项人工核对' if eligible else '证据仍有缺口，先按提示核对或补采'
+    columns = (
+        ('已确认', '仅限机器检查到的文件与记录结构事实', 'confirmed',
+         '尚无可确认的文件或结构事实；不能把未知当作零或正常。'),
+        ('待验证', '协议候选及与实际灯路的对应关系', 'pending',
+         '未提供待验证项；实际灯路、真实状态与会话条件仍需人工核对。'),
+        ('需补采', '缺少或冲突的证据及建议动作', 'resample',
+         '自动检查暂未列出补采项；仍须人工逐项核对，不能据此认定首组通过。'),
+    )
+    groups = '<div class="baseline-groups">' + ''.join(
+        '<div><h3>{}</h3><p class="note">{}</p>{}</div>'.format(
+            escape(title), escape(note), _list(assessment.get(key), empty))
+        for title, note, key, empty in columns) + '</div>'
+    rows = []
+    states = {'ready': '有候选证据，仍须人工核对', 'pending': '待验证', 'resample': '需补采'}
+    for value in _rows(assessment.get('criteria')):
+        item = _mapping(value)
+        rows.append((_text(item.get('title')),
+                     _text(states.get(str(item.get('machine_status')), UNKNOWN)),
+                     _list(item.get('evidence'), '未提供可复核证据，不能视为通过。'),
+                     '必须由人工逐项确认，并记录依据；未核对保持待验证'))
+    simulation = ('<p class="baseline-blocker">合成演练只能体验核对流程，不能确认首组真实灯路，'
+                  '不能解锁其他灯采样。</p>') if report.get('simulation') is True else ''
+    return ('<section id="baseline"><h2><span>首组</span>首组报文核对</h2>'
+            '<div class="ha-state"><strong>首组核对：尚未人工确认 · ' + heading + '</strong>'
+            '<p>自动检查不会确认真实灯路。“已确认”仅指文件与结构事实；'
+            '开关含义、状态来源、面板对应及重进 App 回读仍是候选解释，ACK 不能作为状态反馈。'
+            '人工通过是本轮证据的复核声明，不改变 HA 接入或真实物理反馈的自动验证标记。</p></div>'
+            + simulation + groups
+            + '<h3>逐项人工必需核对</h3>'
+            + _table(('核对项目', '自动检查结果', '证据与引用（私有）', '人工要求'), rows,
+                     '缺少逐项核对项目；请重新分析原件，不能确认首组或采其他灯。')
+            + '<h3>当前阻碍</h3>'
+            + _list(assessment.get('blockers'), '未列出机器阻碍，仍须完成人工复核。')
+            + '<p class="note">可由具备分析能力的业主或协助分析者复核原始样本。'
+            '在图形工具中逐项填写依据并保存绑定本轮原件的复核记录后，才引导采其他灯。'
+            '本页是静态报告，不提供确认按钮，也不批准在线控制。</p></section>')
+
+
 def _quality(report):
     quality = _mapping(report.get('quality'))
     checks = []
@@ -213,7 +264,8 @@ STYLE = '''
 :root{color-scheme:light;--ink:#1d2a32;--muted:#5b6b74;--line:#dce3e6;--accent:#086b74}
 *{box-sizing:border-box}body{margin:0;background:#f4f6f6;color:var(--ink);font:15px/1.65 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif}
 main{max-width:1240px;margin:0 auto;background:#fff;padding:38px 44px 28px}header{border-top:5px solid var(--accent);padding-top:22px}h1{font-size:30px;line-height:1.3;margin:12px 0}h2{font-size:21px;margin:0 0 15px}h2>span{color:var(--accent);font-size:14px;letter-spacing:1px;margin-right:13px}h3{font-size:16px;margin:23px 0 8px}p{margin:8px 0 14px}.eyebrow{color:var(--accent);font-size:12px;letter-spacing:2px;font-weight:700}.privacy{background:#eaf4f4;border-left:4px solid var(--accent);padding:12px 16px;margin:19px 0}.privacy strong{display:block;font-size:17px}.privacy p,.ha-state p{margin-bottom:0}.simulation{background:#fff3d9;border:2px solid #9a6c0b;padding:13px 16px;margin:15px 0;color:#684600;font-weight:700}.meta{font-size:13px;color:var(--muted);overflow-wrap:anywhere}.counts{display:flex;flex-wrap:wrap;border-top:1px solid var(--line);border-bottom:1px solid var(--line);margin:25px 0 18px;padding:15px 0;gap:16px 38px}.counts div{min-width:110px}.counts dt{font-size:12px;color:var(--muted)}.counts dd{font-size:26px;font-weight:650;margin:0;line-height:1.4}nav{display:flex;gap:8px 20px;flex-wrap:wrap;padding-bottom:6px}nav a{color:var(--accent);text-decoration:none;font-size:13px}nav a:hover{text-decoration:underline}section{border-top:1px solid var(--line);margin-top:28px;padding-top:27px}.note,.empty{color:var(--muted);font-size:14px}.empty{background:#f7f9f9;padding:12px 14px}.table-scroll{overflow-x:auto;margin-top:16px}table{width:100%;border-collapse:collapse;font-size:13px;text-align:left}th{padding:10px 12px;background:#edf2f3;font-size:12px;white-space:nowrap}td{vertical-align:top;padding:13px 12px;border-bottom:1px solid var(--line);overflow-wrap:anywhere;max-width:430px}td ul{margin:0;padding-left:16px;min-width:120px}.time{display:block;font-size:12px;white-space:nowrap}.badge{display:inline-block;border-radius:3px;padding:2px 7px;font-size:12px;white-space:nowrap}.badge.ok{background:#e5f1e9;color:#285c3b}.badge.warn{background:#fff0ce;color:#805709}.badge.bad{background:#fde9e6;color:#9d302b}.badge.muted{background:#edf0f1;color:#5c6970}code,pre,.endpoint{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}code{font-size:12px}details{margin-top:10px}summary{color:var(--accent);cursor:pointer;font-size:12px}pre{font-size:11px;line-height:1.6;background:#f1f4f4;white-space:pre-wrap;overflow-wrap:anywhere;padding:12px;max-height:430px;overflow:auto}.ha-state{border-left:4px solid #b68325;background:#fff8e9;padding:14px 17px;margin:16px 0}.ha-state strong{color:#725214}li{margin:6px 0}footer{border-top:1px solid var(--line);margin-top:35px;padding-top:16px;font-size:12px;color:var(--muted)}
-@media(max-width:740px){main{padding:24px 18px}h1{font-size:25px}.counts{gap:12px 24px}.counts div{min-width:82px}.counts dd{font-size:23px}td,th{padding:10px 9px}nav{gap:8px 15px}}
+.baseline-groups{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin:19px 0}.baseline-groups>div{border:1px solid var(--line);padding:0 16px 12px;overflow-wrap:anywhere}.baseline-groups h3{margin-top:13px}.baseline-groups ul{padding-left:18px}.baseline-blocker{background:#fff0ce;color:#805709;padding:12px 16px;font-weight:650}
+@media(max-width:740px){main{padding:24px 18px}h1{font-size:25px}.counts{gap:12px 24px}.counts div{min-width:82px}.counts dd{font-size:23px}td,th{padding:10px 9px}nav{gap:8px 15px}.baseline-groups{grid-template-columns:1fr}}
 @media print{body{background:white}main{max-width:none;padding:12px}nav{display:none}.table-scroll{overflow:visible}pre{max-height:none}section{break-inside:auto}thead{display:table-header-group}.privacy,.simulation,.ha-state,th{print-color-adjust:exact}a{color:inherit}details>pre{display:block}summary{display:none}}
 '''
 
@@ -251,11 +303,12 @@ def render_report(report: dict) -> str:
             '<p>本页可能包含住户 IP、设备标识、操作时间及报文字段。仅在本机审阅；'
             '不要把报告或原始抓包提交到公开仓库、Issue 或业主群。页面无需联网。</p></div>'
             + banner + counts
-            + '<nav aria-label="报告章节"><a href="#quality">样本质量</a>'
+            + '<nav aria-label="报告章节"><a href="#baseline">首组核对</a>'
+            '<a href="#quality">样本质量</a>'
             '<a href="#events">动作时间线</a><a href="#devices">设备候选</a>'
             '<a href="#flows">通信流</a><a href="#frames">协议帧</a>'
             '<a href="#next">接入条件与下一步</a></nav></header>'
-            + _quality(report) + _events(report) + _devices(report)
+            + _baseline(report) + _quality(report) + _events(report) + _devices(report)
             + _flows(report) + _frames(report) + _readiness(report)
             + '<section id="source"><h2><span>附</span>来源与完整性记录</h2>'
             + _raw('展开输入来源记录（私有）', _mapping(report.get('source')))

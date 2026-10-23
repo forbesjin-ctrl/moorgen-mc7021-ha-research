@@ -27,10 +27,12 @@ PUBLIC_FILES = frozenset({
     'tests/test_gui_worker.py', 'tests/test_gui_capture_backend.py', 'tests/test_build_macos_app.py',
     'docs/MAC_GUI.md', 'docs/MAC_APP_BUILD.md',
     'docs/MULTI_DEVICE.md', 'tools/collection_report.py', 'tests/test_collection_report.py',
+    'docs/FIRST_LIGHT_REVIEW.md', 'tools/baseline_review.py', 'tests/test_baseline_review.py',
+    'tools/ha_handoff.py', 'tests/test_ha_handoff.py',
     '.github/ISSUE_TEMPLATE/compatibility.yml', '.github/ISSUE_TEMPLATE/bug_report.md',
     '.github/ISSUE_TEMPLATE/config.yml', '.github/workflows/offline.yml',
 })
-PRIVATE_DIRS = frozenset({'.git', 'captures', 'demo_runs', 'demo_collections', 'private_reports',
+PRIVATE_DIRS = frozenset({'.git', 'captures', 'demo_runs', 'demo_collections', 'private_reports', 'baseline_reviews', 'private_reviews', 'private_ha_handoffs',
                          'private_samples', 'work', 'artifacts', '__pycache__'})
 FAKE_UDIDS = frozenset({'00000001-0000000000000001', '00000000-0000000000000000'})
 DOC_NETWORKS = tuple(ipaddress.ip_network(x) for x in

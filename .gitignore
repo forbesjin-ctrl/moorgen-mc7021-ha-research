@@ -37,3 +37,6 @@ __pycache__/
 *.tar.zst
 /macos/capture-helper
 /demo_collections/
+/baseline_reviews/
+/private_reviews/
+/private_ha_handoffs/

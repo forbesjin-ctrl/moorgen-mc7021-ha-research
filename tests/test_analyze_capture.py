@@ -161,7 +161,72 @@ class SessionAnalysisTests(unittest.TestCase):
         self.assertFalse(report['readiness']['can_start_live_ha'])
         self.assertFalse(candidate['physical_feedback_verified'])
         self.assertIn('合成', (destination/'报告.html').read_text())
-        self.assertEqual({p.name for p in destination.iterdir()}, {'报告.html','report.json','匿名摘要.json','HA接入待验证.json'})
+        self.assertEqual({p.name for p in destination.iterdir()},
+                         {'报告.html', 'report.json', '首组核对.json', '匿名摘要.json', 'HA接入待验证.json'})
+
+    def test_baseline_assessment_is_generated_and_stored_as_private_evidence(self):
+        destination, report = self.analyze(ordinary_ids=(demo.DEVICE,))
+        assessment = report['baseline_assessment']
+        self.assertEqual(assessment['artifact'], 'first_light_baseline_assessment')
+        self.assertEqual(json.loads((destination / '首组核对.json').read_text()), assessment)
+        self.assertEqual(json.loads((destination / 'report.json').read_text())['baseline_assessment'], assessment)
+        self.assertTrue(assessment['confirmed'])
+        self.assertTrue(assessment['pending'])
+        self.assertTrue(all(row['manual_required'] is True for row in assessment['criteria']))
+        self.assertFalse(assessment['passed'])
+        self.assertFalse(assessment['eligible_for_manual_review'])
+        self.assertFalse(report['readiness']['physical_feedback_verified'])
+        self.assertFalse(report['readiness']['can_start_live_ha'])
+        content = (destination / '报告.html').read_text()
+        for label in ['首组报文核对', '已确认', '待验证', '需补采', '逐项人工必需核对']:
+            self.assertIn(label, content)
+
+    def test_baseline_file_facts_do_not_claim_device_or_physical_verification(self):
+        _, report = self.analyze(ordinary_ids=(demo.DEVICE,))
+        facts = '\n'.join(report['baseline_assessment']['confirmed'])
+        self.assertNotIn(demo.DEVICE.hex(), facts)
+        for phrase in ['真实状态已确认', '实际灯路已确认', '设备兼容已验证', '首组已通过']:
+            self.assertNotIn(phrase, facts)
+        self.assertFalse(report['baseline_assessment']['passed'])
+
+    def test_baseline_missing_capture_requests_resample_not_approval(self):
+        (self.session / 'traffic.pcap').unlink()
+        _, report = self.analyze()
+        assessment = report['baseline_assessment']
+        self.assertTrue(assessment['resample'])
+        self.assertTrue(assessment['blockers'])
+        self.assertFalse(assessment['eligible_for_manual_review'])
+        self.assertFalse(assessment['passed'])
+        criterion = next(row for row in assessment['criteria'] if row['id'] == 'sample_quality')
+        self.assertEqual(criterion['machine_status'], 'resample')
+
+    def test_baseline_panel_ack_and_execution_response_cannot_substitute_for_state(self):
+        _, report = self.analyze(ordinary_ids=(demo.DEVICE,))
+        for frame in report['frames']:
+            if set(frame.get('nearby_steps', [])) & {'面板开', '面板关', 'App关闭期间面板开'}:
+                frame.update(kind='ack_not_state', states=[])
+        for window in report['events']:
+            if window['step'] in ('面板开', '面板关', 'App关闭期间面板开'):
+                window.update(state_count=0, ack_count=1, execution_response_count=1)
+        assessment = analysis.assess_report(report)
+        criterion = next(row for row in assessment['criteria'] if row['id'] == 'panel_feedback')
+        self.assertEqual(criterion['machine_status'], 'resample')
+        self.assertFalse(assessment['eligible_for_manual_review'])
+        self.assertFalse(assessment['passed'])
+
+    def test_baseline_private_notes_never_enter_anonymous_or_ha_artifacts(self):
+        _, report = self.analyze()
+        report['baseline_assessment'].update(
+            confirmed=['私有核对备注'], pending=['私有核对备注'],
+            resample=['私有核对备注'], notes='私有核对备注', label='私有核对备注',
+            room='私有核对备注', candidate_identifiers=[demo.DEVICE.hex()])
+        summary = analysis.anonymous_summary(report)
+        text = json.dumps(summary, ensure_ascii=False)
+        self.assertNotIn('私有核对备注', text)
+        self.assertNotIn(demo.DEVICE.hex(), text)
+        self.assertNotIn('baseline_assessment', summary)
+        self.assertFalse(summary['physical_feedback_verified'])
+        self.assertFalse(summary['compatibility_verified'])
 
     def test_analysis_does_not_modify_inputs_and_sets_private_permissions(self):
         before = {p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in self.session.iterdir()}
@@ -169,6 +234,58 @@ class SessionAnalysisTests(unittest.TestCase):
         self.assertEqual(before, {p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in self.session.iterdir()})
         self.assertEqual(destination.stat().st_mode & 0o777, 0o700)
         self.assertTrue(all(p.stat().st_mode & 0o777 == 0o600 for p in destination.iterdir()))
+
+    def test_report_binds_all_three_original_files_at_analysis_time(self):
+        expected = {name: dict(size_bytes=(self.session / name).stat().st_size,
+                               sha256=hashlib.sha256((self.session / name).read_bytes()).hexdigest())
+                    for name in ('session.json', 'events.jsonl', 'traffic.pcap')}
+        destination, report = self.analyze()
+        self.assertEqual(report['source']['input_files'], expected)
+        self.assertEqual(json.loads((destination / 'report.json').read_text())['source']['input_files'], expected)
+        check = next(row for row in report['quality']['checks'] if row['name'] == '分析原件绑定')
+        self.assertEqual(check['status'], 'pass')
+        self.assertNotIn('input_files', json.dumps(analysis.anonymous_summary(report)))
+
+    def test_each_original_changed_after_parsing_blocks_binding_and_review(self):
+        original_candidates = analysis.device_candidates
+        for name in ('session.json', 'events.jsonl', 'traffic.pcap'):
+            with self.subTest(name=name):
+                path = self.session / name
+                before = path.read_bytes()
+                before_digest = hashlib.sha256(before).hexdigest()
+
+                def mutate_after_parsing(*args):
+                    result = original_candidates(*args)
+                    path.write_bytes(before + b'\n')
+                    return result
+
+                try:
+                    with mock.patch.object(analysis, 'device_candidates', side_effect=mutate_after_parsing):
+                        _, report = self.analyze()
+                    check = next(row for row in report['quality']['checks'] if row['name'] == '分析原件绑定')
+                    self.assertEqual(check['status'], 'fail')
+                    self.assertEqual(report['quality']['level'], 'blocked')
+                    self.assertEqual(report['source']['input_files'][name]['sha256'], before_digest)
+                    self.assertNotEqual(report['source']['input_files'][name]['sha256'],
+                                        hashlib.sha256(path.read_bytes()).hexdigest())
+                    self.assertFalse(report['baseline_assessment']['eligible_for_manual_review'])
+                    self.assertFalse(report['baseline_assessment']['passed'])
+                finally:
+                    path.write_bytes(before)
+
+    def test_missing_or_symlink_original_has_unknown_binding_not_empty_digest(self):
+        path = self.session / 'traffic.pcap'
+        path.unlink()
+        _, report = self.analyze()
+        self.assertIsNone(report['source']['input_files']['traffic.pcap'])
+        outside = self.root / 'outside.pcap'
+        outside.write_bytes(b'private-outside-target')
+        path.symlink_to(outside)
+        _, report = self.analyze()
+        self.assertIsNone(report['source']['input_files']['traffic.pcap'])
+        self.assertFalse(report['baseline_assessment']['eligible_for_manual_review'])
+        self.assertEqual(next(row['status'] for row in report['quality']['checks']
+                              if row['name'] == '分析原件绑定'), 'fail')
 
     def test_missing_pcap_is_unknown_not_zero_or_fake_success(self):
         (self.session/'traffic.pcap').unlink()

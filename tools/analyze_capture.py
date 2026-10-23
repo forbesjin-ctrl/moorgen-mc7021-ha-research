@@ -11,7 +11,9 @@ from datetime import datetime, timezone
 import hashlib
 import ipaddress
 import json
+import os
 from pathlib import Path
+import stat
 import struct
 import uuid
 
@@ -20,17 +22,21 @@ try:
     from .pcap_reader import read_pcap, PcapError
     from .report_view import render_report
     from .capture_mc7021_light import validate_target_context
+    from .baseline_review import assess_report
 except ImportError:
     import offline_shcp as codec
     from pcap_reader import read_pcap, PcapError
     from report_view import render_report
     from capture_mc7021_light import validate_target_context
+    from baseline_review import assess_report
 
 VERSION = '0.2.0'
 MAX_METADATA = 4 * 1024 * 1024
 MAX_EVENTS = 10000
 MAX_FLOWS = 1024
 MAX_FRAMES = 5000
+INPUT_LIMITS = {'session.json': MAX_METADATA, 'events.jsonl': MAX_METADATA,
+                'traffic.pcap': 128 * 1024 * 1024}
 ROOT = Path(__file__).resolve().parents[1]
 REQUIRED_STEPS = frozenset(('初始同步', 'App开1', 'App关1', 'App开2', 'App关2', '面板开',
                             '面板关', '关闭App', 'App关闭期间面板开', '重进App读状态'))
@@ -47,6 +53,51 @@ def load_small(path):
     if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_METADATA:
         raise ValueError('元数据缺失、为符号链接或超过4MiB：' + path.name)
     return path.read_text(encoding='utf-8')
+
+
+def input_file_snapshot(directory):
+    """Hash only the three fixed original files; unavailable entries stay unknown.
+
+    Avoid following symlinks and reject files that change while being read. A
+    second complete snapshot after analysis detects changes before a report is
+    bound to its inputs. This does not authenticate who supplied the files.
+    """
+    result = {}
+    for name, limit in INPUT_LIMITS.items():
+        path = directory / name
+        result[name] = None
+        descriptor = None
+        try:
+            if path.is_symlink():
+                continue
+            flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0)
+            descriptor = os.open(path, flags)
+            before = os.fstat(descriptor)
+            if not stat.S_ISREG(before.st_mode) or before.st_size > limit:
+                continue
+            digest, count = hashlib.sha256(), 0
+            with os.fdopen(descriptor, 'rb', closefd=False) as source:
+                while True:
+                    chunk = source.read(min(1024 * 1024, limit + 1 - count))
+                    if not chunk:
+                        break
+                    count += len(chunk)
+                    if count > limit:
+                        break
+                    digest.update(chunk)
+            after = os.fstat(descriptor)
+            identity = lambda info: (info.st_dev, info.st_ino, info.st_size,
+                                     info.st_mtime_ns, info.st_ctime_ns)
+            if count <= limit and count == before.st_size and identity(before) == identity(after):
+                result[name] = dict(size_bytes=count, sha256=digest.hexdigest())
+        except OSError:
+            # Missing, denied, symbolic or otherwise unreadable is not an empty
+            # successful capture and must never receive a fabricated digest.
+            pass
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+    return result
 
 
 def read_events(path):
@@ -347,6 +398,7 @@ def anonymous_summary(report):
 
 def analyze_session(directory, output_root=None, ordinary_ids=()):
     directory = Path(directory).expanduser().resolve()
+    input_files = input_file_snapshot(directory)
     metadata = json.loads(load_small(directory / 'session.json'))
     if not isinstance(metadata, dict):
         raise ValueError('session.json必须为对象')
@@ -462,6 +514,15 @@ def analyze_session(directory, output_root=None, ordinary_ids=()):
         next_actions.append('逐包复核唯一重复开关候选与同一实际灯路，确认设备类型及会话条件')
     next_actions.extend(['逐步对照面板操作、肉眼亮灭、App显示和重进App回读；排除手动刷新与周期查询',
         '证据确认后才开发单灯HA适配：独立状态、掉线不可用、重连回读；需要另行安排实机验证'])
+    final_input_files = input_file_snapshot(directory)
+    if any(input_files[name] is None or final_input_files[name] is None for name in INPUT_LIMITS):
+        check('分析原件绑定', 'fail',
+              '三原件未全部取得稳定的大小与SHA256；缺失、符号链接或读取期间变化保持未知，不能确认首组。')
+    elif final_input_files != input_files:
+        check('分析原件绑定', 'fail',
+              '分析期间session.json、events.jsonl或traffic.pcap发生变化；本报告不能绑定当前原件，请重新分析不变的原件。')
+    else:
+        check('分析原件绑定', 'pass', '三原件在分析前后大小与SHA256一致；仅证明内容绑定，不认证住宅或操作身份。')
     level = 'blocked' if any(c['status'] == 'fail' for c in checks) else 'limited' if warnings or any(c['status'] == 'warn' for c in checks) else 'reviewable'
     gates = [dict(name='真实样本', status='pass' if simulation is False else 'pending', detail='合成数据不能验证任何住户'),
         dict(name='重复开关对象', status='candidate' if len(repeated) == 1 else 'pending', detail='仅为协议候选，实际灯路和类型待核对'),
@@ -472,6 +533,7 @@ def analyze_session(directory, output_root=None, ordinary_ids=()):
         target_context=target_context,
         source=dict(folder=directory.name, capture_status=source_status, target_ip=target,
                     sample_origin=metadata.get('sample_origin', 'unknown'), input_integrity=input_integrity,
+                    input_files=input_files,
                     linktype=capture['linktype'], format=capture['format']),
         quality=dict(level=level, checks=checks, warnings=sorted(set(warnings))),
         summary=dict(packet_count=capture['packet_count'], target_packet_count=capture['target_packet_count'],
@@ -480,11 +542,16 @@ def analyze_session(directory, output_root=None, ordinary_ids=()):
         events=windows, flows=flows, frames=frames, device_candidates=candidates,
         readiness=dict(can_start_live_ha=False, physical_feedback_verified=False, gates=gates),
         unknowns=unknowns, next_actions=next_actions)
+    # This assessment separates machine-checkable file facts from protocol and
+    # physical-light interpretations. It can request a human review, never pass
+    # the baseline or authorize a transport/HA configuration automatically.
+    report['baseline_assessment'] = assess_report(report)
     root = Path(output_root) if output_root else ROOT / 'private_reports'
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     destination = root / ('analysis_' + datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S') + '_' + uuid.uuid4().hex[:8])
     destination.mkdir(mode=0o700)
     artifacts = {'report.json': json.dumps(report, ensure_ascii=False, indent=2), '报告.html': render_report(report),
+        '首组核对.json': json.dumps(report['baseline_assessment'], ensure_ascii=False, indent=2),
         '匿名摘要.json': json.dumps(anonymous_summary(report), ensure_ascii=False, indent=2),
         'HA接入待验证.json': json.dumps(dict(schema_version=VERSION, live_control_enabled=False,
             transport=None, authentication=None, wire_identifier=None, on_command=None, off_command=None,

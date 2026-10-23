@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import re
 import signal
+import stat
 import sys
 import threading
 import uuid
@@ -23,14 +24,18 @@ try:
     from . import capture_mc7021_light as capture
     from .analyze_capture import analyze_session
     from . import demo_sample as demo
+    from . import baseline_review as reviews
 except ImportError:
     import capture_mc7021_light as capture
     from analyze_capture import analyze_session
     import demo_sample as demo
+    import baseline_review as reviews
 
 
 MAX_INPUT_BYTES = 64 * 1024
 MAX_LOG_CHARS = 16 * 1024
+MAX_REVIEW_FORM_BYTES = 4 * 1024 * 1024
+REVIEW_FORM_FIELDS = {'decisions', 'notes', 'selected_identifier', 'reviewer_label'}
 
 
 class WorkerError(RuntimeError):
@@ -216,8 +221,21 @@ def make_parser():
     sampling.add_argument('--room-label')
     sampling.add_argument('--collection-id')
     sampling.add_argument('--baseline-reviewed', action='store_true')
+    sampling.add_argument('--review-file', type=Path)
     collection = modes.add_parser('collection')
     collection.add_argument('--capture-root', required=True, type=Path)
+    handoff = modes.add_parser('ha-handoff')
+    handoff.add_argument('--review-file', required=True, type=Path)
+    handoff.add_argument('--host-ip')
+    review_save = modes.add_parser('review-save')
+    review_save.add_argument('--report-dir', required=True, type=Path)
+    review_save.add_argument('--session-dir', required=True, type=Path)
+    review_save.add_argument('--form-file', required=True, type=Path)
+    review_list = modes.add_parser('review-list')
+    review_list.add_argument('--host-ip')
+    review_validate = modes.add_parser('review-validate')
+    review_validate.add_argument('--review-file', required=True, type=Path)
+    review_validate.add_argument('--host-ip')
     return parser
 
 
@@ -244,13 +262,109 @@ def analyze_and_emit(protocol, directory, data_dir, ordinary_ids=(), capture_sta
     protocol.emit('result', report_path=str((destination / '报告.html').resolve()),
         report_dir=str(destination.resolve()), session_dir=str(Path(directory).resolve()),
         summary=report['summary'], quality=report['quality']['level'],
-        simulation=report['simulation'], capture_status=capture_status)
+        simulation=report['simulation'], capture_status=capture_status,
+        source=report.get('source', {}), target_context=report.get('target_context'),
+        baseline_assessment=reviews.assess_report(report),
+        review_draft=reviews.draft_review(report))
     return report
+
+
+def _unique_json_object(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise WorkerError('核对表单含重复字段，请重新保存。')
+        value[key] = item
+    return value
+
+
+def load_review_form(path, data_root):
+    """Read a bounded local form without following a selected symlink.
+
+    Forms are private evidence. They must live beneath the user-selected data
+    folder, not within the application or a public source checkout.
+    """
+    root = Path(data_root).resolve()
+    path = Path(path).expanduser().absolute()
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        raise WorkerError('核对表单必须保存在当前本机数据文件夹内。')
+    if not relative.parts or any(part in ('.', '..') for part in relative.parts):
+        raise WorkerError('核对表单路径无效。')
+    current = root
+    for part in relative.parts:
+        current = current / part
+        if current.is_symlink():
+            raise WorkerError('核对表单及其父目录不能是符号链接。')
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0))
+    try:
+        details = os.fstat(descriptor)
+        if not stat.S_ISREG(details.st_mode) or details.st_size > MAX_REVIEW_FORM_BYTES:
+            raise WorkerError('核对表单必须是大小不超过 4 MiB 的普通 JSON 文件。')
+        with os.fdopen(descriptor, 'rb', closefd=False) as source:
+            payload = source.read(MAX_REVIEW_FORM_BYTES + 1)
+        if len(payload) > MAX_REVIEW_FORM_BYTES:
+            raise WorkerError('核对表单超过 4 MiB，请重新保存。')
+    finally:
+        os.close(descriptor)
+    try:
+        form = json.loads(payload.decode('utf-8'), object_pairs_hook=_unique_json_object,
+                          parse_constant=lambda value: (_ for _ in ()).throw(ValueError('non-finite number')))
+    except (UnicodeError, ValueError, RecursionError):
+        raise WorkerError('核对表单不是有效 JSON，请重新保存。')
+    if not isinstance(form, dict) or set(form) != REVIEW_FORM_FIELDS:
+        raise WorkerError('核对表单字段不完整或含未知字段，请重新保存。')
+    if (not isinstance(form['decisions'], dict) or not isinstance(form['notes'], dict)
+            or not isinstance(form['selected_identifier'], str)
+            or not isinstance(form['reviewer_label'], str)):
+        raise WorkerError('核对表单字段类型无效，请重新保存。')
+    return form
+
+
+def run_review_save(args, protocol):
+    form = load_review_form(args.form_file, args.data_dir)
+    record_path, record = reviews.save_review(args.report_dir, args.session_dir,
+        args.data_dir, decisions=form['decisions'], notes=form['notes'],
+        selected_identifier=form['selected_identifier'], reviewer_label=form['reviewer_label'])
+    validation = reviews.validate_review(record_path, args.data_dir)
+    protocol.emit('review_saved', record_path=str(record_path), record=record,
+                  validation=validation, passed=validation.get('passed') is True)
+
+
+def review_summary(validation):
+    """Bound list output; opening one chosen file revalidates its full record."""
+    if not isinstance(validation, dict):
+        raise WorkerError('本机核对记录列表格式无效，请直接选择一条记录重新检查。')
+    record = validation.get('record') if isinstance(validation.get('record'), dict) else {}
+    assessment = validation.get('assessment') if isinstance(validation.get('assessment'), dict) else {}
+    def text(value, limit=256):
+        return value[:limit] if isinstance(value, str) else None
+    context = record.get('target_context')
+    context = ({key: text(context.get(key)) for key in ('label', 'room', 'kind', 'collection_id')}
+               if isinstance(context, dict) else None)
+    valid = validation.get('valid') is True
+    return dict(review_file=text(validation.get('review_file'), 4096), valid=valid,
+        passed=valid and validation.get('passed') is True,
+        errors=[text(item, 512) for item in validation.get('errors', [])[:4] if isinstance(item, str)]
+               if isinstance(validation.get('errors'), list) else ['本机核对记录错误信息无效'],
+        record=dict(review_id=text(record.get('review_id')), host_ip=text(record.get('host_ip')),
+                    target_context=context, created_at=text(record.get('created_at'))),
+        assessment=dict(eligible_for_manual_review=assessment.get('eligible_for_manual_review') is True,
+                        confirmed_count=len(assessment.get('confirmed', [])) if isinstance(assessment.get('confirmed'), list) else 0,
+                        pending_count=len(assessment.get('pending', [])) if isinstance(assessment.get('pending'), list) else 0,
+                        resample_count=len(assessment.get('resample', [])) if isinstance(assessment.get('resample'), list) else 0))
 
 
 def run_capture(args, protocol, backend_factory=None):
     ip, udid = capture.validate_ip(args.host_ip), capture.validate_udid(args.udid)
     context = capture.build_target_context(args.target_label, args.room_label, args.collection_id)
+    baseline_validation = None
+    if args.review_file is not None:
+        baseline_validation = reviews.validate_review(args.review_file, args.data_dir,
+                                                      expected_host=ip)
+        if baseline_validation.get('valid') is not True or baseline_validation.get('passed') is not True:
+            raise WorkerError('首组核对记录未通过、原件发生变化或主机不匹配；请先在“首组核对”重新检查。')
     protocol.emit('capture_preflight', status='validated')
     protocol.secrets.append(udid)
     if backend_factory is None:
@@ -261,9 +375,15 @@ def run_capture(args, protocol, backend_factory=None):
         backend_factory = GuiSystemBackend
     backend = backend_factory()
     journal = capture.Journal(args.data_dir / 'captures', False)
+    if baseline_validation is not None:
+        record = baseline_validation.get('record', {})
+        journal.record('baseline_review_reference', review_file=str(args.review_file.resolve()),
+            review_id=record.get('review_id'), human_review_passed=True,
+            physical_identity_verified_by_tool=False, independent_state_verified_by_tool=False)
     if args.baseline_reviewed:
         journal.record('baseline_review_declared', owner_declaration=True,
-            physical_identity_verified_by_tool=False, independent_state_verified_by_tool=False)
+            unlocks_additional_sampling=False, physical_identity_verified_by_tool=False,
+            independent_state_verified_by_tool=False)
     session = GuiGuidedSession(ip, udid, journal, backend, protocol=protocol,
         sample_origin='external_owner_household', target_context=context)
     with signal_handlers(session.signal_handler):
@@ -330,6 +450,30 @@ def run(argv=None, protocol=None, backend_factory=None):
                     ok = True
                 elif args.mode == 'analyze':
                     analyze_and_emit(protocol, args.session_dir, args.data_dir)
+                    ok = True
+                elif args.mode == 'ha-handoff':
+                    try:
+                        from .ha_handoff import export_handoff
+                    except ImportError:
+                        from ha_handoff import export_handoff
+                    expected = capture.validate_ip(args.host_ip) if args.host_ip else None
+                    directory, manifest = export_handoff(args.review_file, args.data_dir, expected_host=expected)
+                    protocol.emit('ha_handoff', directory=str(directory), manifest=manifest)
+                    ok = True
+                elif args.mode == 'review-save':
+                    run_review_save(args, protocol)
+                    ok = True
+                elif args.mode == 'review-list':
+                    host = capture.validate_ip(args.host_ip) if args.host_ip is not None else None
+                    records = [review_summary(item) for item in
+                               reviews.load_reviews(args.data_dir, expected_host=host)]
+                    protocol.emit('review-list', records=records)
+                    ok = True
+                elif args.mode == 'review-validate':
+                    host = capture.validate_ip(args.host_ip) if args.host_ip is not None else None
+                    validation = reviews.validate_review(args.review_file, args.data_dir,
+                                                          expected_host=host)
+                    protocol.emit('review_validation', review_file=str(args.review_file), **validation)
                     ok = True
                 else:
                     ok = run_capture(args, protocol, backend_factory)

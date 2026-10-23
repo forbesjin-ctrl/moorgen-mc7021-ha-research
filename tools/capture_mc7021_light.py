@@ -25,7 +25,7 @@ import time
 import unicodedata
 import uuid
 
-VERSION = '0.4.0-community'
+VERSION = '0.5.0-community'
 OUTPUTS = Path(__file__).resolve().parents[1]
 SHANGHAI = timezone(timedelta(hours=8), 'Asia/Shanghai')
 RVICTL = '/Library/Apple/usr/bin/rvictl'

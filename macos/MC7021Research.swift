@@ -1,12 +1,14 @@
 import Cocoa
 import Darwin
 
+final class ReviewDocumentView: NSView { override var isFlipped: Bool { true } }
+
 // Native UI and JSON-lines bridge. No web server, network client or terminal.
 // Reports are read as local JSON and rendered with AppKit text controls.
 final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var window: NSWindow!
     private var pages: [NSView] = []
-    private let tabs = NSSegmentedControl(labels: ["演示", "采样", "分析", "报告"], trackingMode: .selectOne, target: nil, action: nil)
+    private let tabs = NSSegmentedControl(labels: ["演示", "采样", "分析", "报告", "首组核对", "HA接入"], trackingMode: .selectOne, target: nil, action: nil)
     private let status = NSTextField(wrappingLabelWithString: "就绪。先选演示，可以体验完整流程。")
     private let folderLabel = NSTextField(wrappingLabelWithString: "首次使用时选择本机数据文件夹。")
     private let host = NSTextField(string: "")
@@ -17,12 +19,29 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var baselineConnection: String?
     private var baselineKey: String?
     private var activeCaptureKey: String?
-    private var baselineHasCompleteReport = false
+    private var activeReviewFile: URL?
+    private var activeReviewPassed = false
+    private let reviewGate = NSTextField(wrappingLabelWithString: "首组尚未通过核对。采完会自动检查，并引导逐项人工复核。")
+    private let reviewSummary = NSTextView()
+    private let reviewCandidate = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let reviewerLabel = NSTextField(string: "")
+    private let reviewIDs = ["sample_quality", "target_identity", "switch_semantics", "panel_feedback", "reopen_readback"]
+    private var reviewChoices: [String: NSPopUpButton] = [:]
+    private var reviewNotes: [String: NSTextField] = [:]
+    private var reviewEvidence: [String: NSTextField] = [:]
+    private var reviewReport: [String: Any]?
+    private var reviewReportDirectory: URL?
+    private var reviewSessionDirectory: URL?
+    private var reportSessions: [String: URL] = [:]
+    private var evidenceWindow: NSWindow?
+    private var lastReviewMessage: String?
+    private let haStatus = NSTextField(wrappingLabelWithString: "请先完成首组逐项核对，或载入有效的已通过记录。")
+    private let haSummary = NSTextView()
+    private var handoffDirectory: URL?
     private var captureCleanupUncertain = false
     private var capturePreflightPassed = false
     private var lastCollectionFailedCount = 0
-    private let baselineReview = NSButton(checkboxWithTitle: "首组已由分析者逐包核对：开关标识、面板独立状态与肉眼一致、重进App回读", target: nil, action: nil)
-    private let consent = NSButton(checkboxWithTitle: "我确认现场条件符合要求，本轮只操作填写的这一组普通灯", target: nil, action: nil)
+    private let consent = NSButton(checkboxWithTitle: "我确认现场仍是本人确认的这户MC7021，本轮只操作填写的这一组普通灯", target: nil, action: nil)
     private var captureContents: NSView?
     private let stepTitle = NSTextField(wrappingLabelWithString: "等待开始")
     private let instruction = NSTextField(wrappingLabelWithString: "")
@@ -61,7 +80,7 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
            FileManager.default.fileExists(atPath: path) { dataDirectory = URL(fileURLWithPath: path, isDirectory: true) }
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1040, height: 800),
                           styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
-        window.title = "MC7021 研究工具 · v0.4.0"
+        window.title = "MC7021 研究工具 · v0.5.0"
         window.minSize = NSSize(width: 920, height: 740)
         window.delegate = self
         let content = window.contentView!
@@ -83,7 +102,7 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         root.addArrangedSubview(container)
         container.widthAnchor.constraint(equalTo: root.widthAnchor).isActive = true
         container.heightAnchor.constraint(greaterThanOrEqualToConstant: 245).isActive = true
-        for page in [makeDemoPage(), makeCapturePage(), makeAnalysisPage(), makeReportsPage()] {
+        for page in [makeDemoPage(), makeCapturePage(), makeAnalysisPage(), makeReportsPage(), makeReviewPage(), makeHAPage()] {
             page.translatesAutoresizingMaskIntoConstraints = false
             page.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .vertical)
             container.addSubview(page)
@@ -186,8 +205,7 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let result = stack([label("可以采多盏，每轮只操作一组", 20, .semibold),
             label("需要人在这套房子里，iPhone 连平时的家庭 Wi-Fi，USB 接 Mac 并信任。原厂 App 和面板本来就能正常控制这组灯。\n只做正常 App / 面板操作，不扫描、不修改配置、不涉及场景、总断电或安防。", 13),
             label("先采第一组并人工对准请求、面板变化、肉眼状态与App回读，再逐组扩展。每轮独立保存；报告成功不自动确认身份或状态。IP/UDID可在本次打开期间复用。", 12),
-            grid, consent, baselineReview, button("开始本轮采样", #selector(startCapture)), tools])
-        baselineReview.isEnabled = baselineHasCompleteReport
+            grid, consent, reviewGate, button("开始本轮采样", #selector(startCapture)), tools])
         grid.widthAnchor.constraint(equalTo: result.widthAnchor).isActive = true
         captureContents = result
         return topAligned(result)
@@ -218,10 +236,239 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         row.orientation = .horizontal; row.spacing = 10
         reportPicker.widthAnchor.constraint(equalToConstant: 370).isActive = true
         let scroll = scrollText(reportText); reportText.font = .systemFont(ofSize: 13)
-        let result = stack([label("本机报告 · 私下处理", 20, .semibold), row, scroll])
+        let result = stack([label("本机报告 · 私下处理", 20, .semibold), row,
+            button("核对此报告的首组证据", #selector(openSelectedReview)), scroll])
         scroll.widthAnchor.constraint(equalTo: result.widthAnchor).isActive = true
         scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 170).isActive = true
         return result
+    }
+
+    private func makeReviewPage() -> NSView {
+        let scroll = NSScrollView(); scroll.hasVerticalScroller = true
+        let document = ReviewDocumentView(); document.translatesAutoresizingMaskIntoConstraints = false
+        let form = stack([]); form.translatesAutoresizingMaskIntoConstraints = false
+        document.addSubview(form); scroll.documentView = document
+        NSLayoutConstraint.activate([document.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
+            form.leadingAnchor.constraint(equalTo: document.leadingAnchor, constant: 4),
+            form.trailingAnchor.constraint(equalTo: document.trailingAnchor, constant: -12),
+            form.topAnchor.constraint(equalTo: document.topAnchor, constant: 4),
+            form.bottomAnchor.constraint(equalTo: document.bottomAnchor, constant: -16)])
+        func add(_ view: NSView) { form.addArrangedSubview(view); view.widthAnchor.constraint(equalTo: form.widthAnchor).isActive = true }
+        add(label("首组核对 · 自动证据 + 人工复核", 20, .semibold))
+        add(label("有经验的业主可自行核对，无需等待指定人员。‘已确认’限文件和结构事实；设备身份、状态含义及肉眼对应需要逐项复核。保存待验证或需补采不会解锁，合成演示不能通过。", 13))
+        let navigation = NSStackView(views: [button("核对当前单轮报告", #selector(openSelectedReview)),
+            button("载入已保存核对记录…", #selector(loadReviewRecord)), button("查看逐帧证据", #selector(showReviewEvidence))])
+        navigation.orientation = .horizontal; navigation.spacing = 10; add(navigation)
+        reviewSummary.string = "请先采样或分析一轮。采完会自动进入此页，列出已确认、待验证和需补采。"
+        reviewSummary.font = .systemFont(ofSize: 13)
+        let summaryScroll = scrollText(reviewSummary); summaryScroll.heightAnchor.constraint(equalToConstant: 210).isActive = true; add(summaryScroll)
+        add(label("人工复核对象（完整线上候选标识，灯名不作为地址）", 14, .semibold))
+        reviewCandidate.addItem(withTitle: "请选择报文候选；未选择不能通过"); add(reviewCandidate)
+        reviewerLabel.placeholderString = "复核者代号，可匿名，例如业主A；只存本机"; reviewerLabel.setAccessibilityLabel("复核者代号"); add(reviewerLabel)
+        let titles = ["样本与现场记录可靠", "对象标识与所选普通灯对准", "重复开关语义一致", "面板独立状态与肉眼一致", "App重进回读当前状态一致"]
+        for (index, identifier) in reviewIDs.enumerated() {
+            add(label("\(index + 1). \(titles[index])", 14, .semibold))
+            let evidence = label("等待本轮检查结果。", 12); reviewEvidence[identifier] = evidence; add(evidence)
+            let choice = NSPopUpButton(frame: .zero, pullsDown: false)
+            choice.addItems(withTitles: ["待验证 · 尚未确认", "通过 · 已核对并有证据", "需补采 · 有缺失或矛盾"])
+            choice.setAccessibilityLabel("\(titles[index])结论"); reviewChoices[identifier] = choice; add(choice)
+            let note = NSTextField(string: ""); note.placeholderString = "填写帧号和判断依据；通过时每项必填。例：帧8/11，同一标识，两次开对应肉眼亮。"
+            note.setAccessibilityLabel("\(titles[index])依据"); reviewNotes[identifier] = note; add(note)
+        }
+        add(label("请在‘查看逐帧证据’中核对方向、对象、原始状态、操作窗口与现场记录。窗口邻近不能证明因果，ACK不是状态。原始样本及报告若变化，已保存记录将失效。", 12))
+        let actions = NSStackView(views: [button("保存逐项核对并检查结论", #selector(saveReviewForm)),
+            button("继续采下一组普通灯", #selector(continueAfterReview)), button("进入HA接入阶段", #selector(enterHAStage))])
+        actions.orientation = .horizontal; actions.spacing = 10; add(actions)
+        return scroll
+    }
+
+    private func makeHAPage() -> NSView {
+        haSummary.string = "首组通过后，有能力的业主可以自行继续HA适配开发与现场验证。\n\n需要分别确认：\n• 连接与认证，以及会话更新；\n• 可重复的开关命令和序号/校验；\n• 独立状态、面板同步与当前状态回读；\n• 掉线不可用、重连重新读取；\n• 一盏灯的HA完整验收。\n\n当前尚无住户实测报文或可安装的HA集成；工具不编造端口、认证、指令或可导入配置，不建立设备连接。"
+        haSummary.font = .systemFont(ofSize: 13)
+        let scroll = scrollText(haSummary); scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 190).isActive = true
+        return stack([label("HA接入阶段 · 由业主自行继续", 20, .semibold),
+            label("首组采样核对通过后，可进入单灯HA适配工作；实际控制仍需完成协议和现场验证。研究包只保存在本机，含私有标识、报文与复核说明，不发群或公开GitHub。", 13),
+            haStatus, button("生成私有HA接入研究包", #selector(exportHAHandoff)),
+            button("在Finder查看HA研究包", #selector(revealHAHandoff)), scroll])
+    }
+
+    @objc private func enterHAStage() {
+        guard !busy, activeReviewPassed, activeReviewFile != nil else {
+            alert("先完成首组核对", "请逐项核对并保存通过结论，或载入有效的已通过记录。合成、待验证、需补采或原件变化时不能进入后续工作。"); return
+        }
+        tabs.selectedSegment = 5; changePage()
+        haStatus.stringValue = "已选择首组人工通过记录。生成研究包时会再次核对原件与当前主机；不会自动连接、安装或发送控制命令。"
+    }
+
+    @objc private func exportHAHandoff() {
+        guard !busy, activeReviewPassed, let path = activeReviewFile else {
+            alert("没有有效通过记录", "请先在首组核对页完成复核。研究包不接受演示或待验证记录。"); return
+        }
+        var arguments = ["--review-file", path.path]
+        let address = host.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !address.isEmpty { arguments += ["--host-ip", address] }
+        start(mode: "ha-handoff", arguments: arguments)
+    }
+
+    @objc private func revealHAHandoff() {
+        guard let directory = handoffDirectory else { alert("尚无研究包", "首组通过后可生成本机私有研究包。"); return }
+        NSWorkspace.shared.activateFileViewerSelecting([directory])
+    }
+
+    private func resetReviewForm() {
+        for key in reviewIDs { reviewChoices[key]?.selectItem(at: 0); reviewNotes[key]?.stringValue = "" }
+        reviewerLabel.stringValue = ""
+    }
+
+    private func readPrivateJSON(_ url: URL) -> [String: Any]? {
+        guard let values = try? url.resourceValues(forKeys: [.fileSizeKey, .isSymbolicLinkKey]),
+              values.isSymbolicLink != true, let size = values.fileSize, size <= 16 * 1024 * 1024,
+              let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    }
+
+    private func prepareReview(_ directory: URL, session: URL? = nil) {
+        guard let report = readPrivateJSON(directory.appendingPathComponent("report.json")) else { return }
+        reviewReport = report; reviewReportDirectory = directory
+        reviewSessionDirectory = session ?? reportSessions[directory.path]
+        if reviewSessionDirectory == nil, let source = report["source"] as? [String: Any],
+           let folder = source["folder"] as? String, folder == URL(fileURLWithPath: folder).lastPathComponent,
+           folder != ".", folder != "..", let root = dataDirectory {
+            for parent in ["captures", "demo_runs"] {
+                let candidate = root.appendingPathComponent(parent).appendingPathComponent(folder)
+                if FileManager.default.fileExists(atPath: candidate.appendingPathComponent("session.json").path) { reviewSessionDirectory = candidate; break }
+            }
+        }
+        let assessment = report["baseline_assessment"] as? [String: Any] ?? [:]
+        resetReviewForm(); reviewCandidate.removeAllItems(); reviewCandidate.addItem(withTitle: "请选择四次重复开关候选；未选择不能通过")
+        for identifier in assessment["candidate_identifiers"] as? [String] ?? [] { reviewCandidate.addItem(withTitle: identifier) }
+        let target = report["target_context"] as? [String: Any] ?? [:]
+        let source = report["source"] as? [String: Any] ?? [:]
+        var lines = [report["simulation"] as? Bool == true ? "合成演示 · 不能通过首组核对" : "本轮首组核对 · 人工结论尚未完成",
+            "本轮：\(text(target["room"])) · \(text(target["label"]))；主机：\(text(source["target_ip"]))；报告：\(directory.lastPathComponent)",
+            "自动检查不确认物理身份或HA可用。", ""]
+        for (key, title) in [("confirmed", "已确认（机器文件/结构事实）"), ("pending", "待验证（需人工核对）"), ("resample", "需补采（具体缺口）")] {
+            lines.append(title)
+            let rows = assessment[key] as? [String] ?? []
+            lines += rows.isEmpty ? [assessment.isEmpty ? "• 旧报告没有首组检查，请重新分析原始采样。" : "• 当前未列出项目，不代表自动通过。"] : rows.map { "• " + $0 }
+            lines.append("")
+        }
+        reviewSummary.string = lines.joined(separator: "\n"); reviewSummary.scrollToBeginningOfDocument(nil)
+        for row in assessment["criteria"] as? [[String: Any]] ?? [] {
+            guard let identifier = row["id"] as? String else { continue }
+            let evidence = row["evidence"] as? [String] ?? []
+            reviewEvidence[identifier]?.stringValue = "机器检查：\(evidenceStatus(row["machine_status"]))；仍需人工复核。\n" + evidence.joined(separator: "\n")
+        }
+    }
+
+    @objc private func openSelectedReview() {
+        guard !busy else { return }
+        let index = reportPicker.indexOfSelectedItem
+        guard index >= 0 && index < reportDirectories.count,
+              FileManager.default.fileExists(atPath: reportDirectories[index].appendingPathComponent("report.json").path) else {
+            alert("请选择单轮报告", "多轮汇总用于比较；首组核对需要一轮完整原始样本及它的单轮报告。"); return
+        }
+        prepareReview(reportDirectories[index]); tabs.selectedSegment = 4; changePage()
+    }
+
+    @objc private func showReviewEvidence() {
+        guard let report = reviewReport else { alert("先选择单轮报告", "采样或离线分析后即可查看逐帧证据。"); return }
+        let viewer = NSTextView(); viewer.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        var content = "私有逐帧证据 · 仅本机查看\n核对方向、标识、原始状态与现场观察。时间邻近不证明因果，ACK不是状态。\n\n"
+        if let data = try? JSONSerialization.data(withJSONObject: ["source": report["source"] ?? [:],
+            "target_context": report["target_context"] ?? NSNull(), "events": report["events"] ?? [],
+            "flows": report["flows"] ?? [], "frames": report["frames"] ?? []], options: [.prettyPrinted, .sortedKeys]),
+           let json = String(data: data, encoding: .utf8) { content += json }
+        viewer.string = content
+        let panel = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 980, height: 680),
+            styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        panel.title = "首组核对 · 私有报文与现场记录"; panel.contentView = scrollText(viewer)
+        panel.center(); panel.makeKeyAndOrderFront(nil); evidenceWindow = panel
+    }
+
+    @objc private func saveReviewForm() {
+        guard !busy, let directory = reviewReportDirectory, let root = requireDataDirectory() else { return }
+        if reviewSessionDirectory == nil {
+            let panel = NSOpenPanel(); panel.title = "选择本报告对应的原始采样文件夹"
+            panel.canChooseFiles = false; panel.canChooseDirectories = true; panel.allowsMultipleSelection = false
+            guard panel.runModal() == .OK, let url = panel.url else { return }; reviewSessionDirectory = url
+        }
+        guard let session = reviewSessionDirectory else { return }
+        let values = ["pending", "pass", "resample"]
+        var decisions: [String: String] = [:], notes: [String: String] = [:]
+        for key in reviewIDs {
+            decisions[key] = values[reviewChoices[key]?.indexOfSelectedItem ?? 0]
+            notes[key] = reviewNotes[key]?.stringValue ?? ""
+        }
+        let selected = reviewCandidate.indexOfSelectedItem > 0 ? reviewCandidate.titleOfSelectedItem ?? "" : ""
+        let form: [String: Any] = ["decisions": decisions, "notes": notes, "selected_identifier": selected, "reviewer_label": reviewerLabel.stringValue]
+        do {
+            let parent = root.appendingPathComponent("private_reviews/forms", isDirectory: true)
+            for folder in [root, root.appendingPathComponent("private_reviews"), parent] {
+                if (try? folder.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) == true { throw CocoaError(.fileWriteNoPermission) }
+            }
+            try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: root.appendingPathComponent("private_reviews").path)
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: parent.path)
+            let path = parent.appendingPathComponent(UUID().uuidString + ".json")
+            try JSONSerialization.data(withJSONObject: form).write(to: path, options: .withoutOverwriting)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path.path)
+            start(mode: "review-save", arguments: ["--report-dir", directory.path, "--session-dir", session.path, "--form-file", path.path])
+        } catch { alert("未能保存表单", "请检查数据目录写入权限；原始样本和报告不修改。"); return }
+    }
+
+    @objc private func loadReviewRecord() {
+        guard !busy else { return }
+        let panel = NSOpenPanel(); panel.title = "选择本机已保存的首组核对JSON记录"
+        panel.canChooseFiles = true; panel.canChooseDirectories = false; panel.allowsMultipleSelection = false
+        if let root = dataDirectory { panel.directoryURL = root.appendingPathComponent("baseline_reviews") }
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        start(mode: "review-validate", arguments: ["--review-file", url.path])
+    }
+
+    @objc private func continueAfterReview() {
+        guard !busy, activeReviewPassed, activeReviewFile != nil else {
+            alert("首组尚未通过", "请先完成自动检查和所有必要人工核对，再保存结论；待验证、需补采、合成或原件变化均不能继续扩展。"); return
+        }
+        targetName.stringValue = ""; targetRoom.stringValue = ""; consent.state = .off
+        tabs.selectedSegment = 1; changePage()
+        status.stringValue = "首组核对记录已选择。填写下一组普通灯；开始前会重新校验原件和主机，仍需本人点击开始。"
+    }
+
+    private func receiveReview(_ validation: [String: Any], path: String?) {
+        let valid = validation["valid"] as? Bool == true
+        let passed = valid && validation["passed"] as? Bool == true
+        activeReviewPassed = passed; activeReviewFile = passed ? path.map { URL(fileURLWithPath: $0) } : nil
+        if valid, let record = validation["record"] as? [String: Any],
+           let source = record["source"] as? [String: Any], let root = dataDirectory,
+           let report = source["report_dir"] as? String, let session = source["session_dir"] as? String {
+            prepareReview(root.appendingPathComponent(report), session: root.appendingPathComponent(session))
+            let choices = ["pending": 0, "pass": 1, "resample": 2]
+            for key in reviewIDs {
+                let decisions = record["decisions"] as? [String: String] ?? [:]
+                reviewChoices[key]?.selectItem(at: choices[decisions[key] ?? "pending"] ?? 0)
+                reviewNotes[key]?.stringValue = (record["notes"] as? [String: String])?[key] ?? ""
+            }
+            if let selected = record["selected_identifier"] as? String, !selected.isEmpty { reviewCandidate.selectItem(withTitle: selected) }
+            reviewerLabel.stringValue = record["reviewer_label"] as? String ?? ""
+            if let target = record["target_context"] as? [String: Any],
+               let name = target["label"] as? String, let room = target["room"] as? String { baselineKey = room + "\n" + name }
+            if host.stringValue.isEmpty, let address = record["host_ip"] as? String { host.stringValue = address }
+        }
+        let message: String
+        if passed {
+            message = "首组人工核对已通过并绑定原件，可继续同一主机的其它普通灯。该结论是本机人工声明，HA仍待验证。"
+        } else if valid {
+            message = "核对记录已保存或恢复：仍有待验证/需补采项，后续采样保持锁定；请补齐证据再逐项核对。"
+        } else {
+            message = "核对记录无效，不能继续扩展。" + (validation["errors"] as? [String] ?? []).joined(separator: "；")
+            resetReviewForm()
+        }
+        reviewGate.stringValue = message; lastReviewMessage = message; status.stringValue = message
+        haStatus.stringValue = passed ? "首组人工通过记录已选择，可生成本机HA接入研究包并自行继续适配。" : "首组尚未通过，HA接入后续工作保持锁定。"
+        reviewSummary.string = message + "\n\n" + reviewSummary.string
+        reviewSummary.scrollToBeginningOfDocument(nil)
+        tabs.selectedSegment = 4; changePage()
     }
 
     @objc private func changePage() {
@@ -240,9 +487,14 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if panel.runModal() == .OK, let selected = panel.url {
             guard FileManager.default.isWritableFile(atPath: selected.path) else { alert("无法写入", "请选择你有写入权限的文件夹。"); return }
             dataDirectory = selected; UserDefaults.standard.set(selected.path, forKey: "data-directory")
-            baselineKey = nil; baselineHasCompleteReport = false
+            baselineKey = nil; activeReviewFile = nil; activeReviewPassed = false
             baselineConnection = nil; collectionID = UUID().uuidString
-            baselineReview.state = .off; baselineReview.isEnabled = false
+            reviewGate.stringValue = "数据目录已更换。请采首组，或载入本目录中已经完成的核对记录。"
+            reviewReport = nil; reviewReportDirectory = nil; reviewSessionDirectory = nil
+            reviewSummary.string = "请先采样或分析一轮，再逐项核对。"; resetReviewForm()
+            handoffDirectory = nil; haStatus.stringValue = "数据目录已更换，请载入本目录中有效的首组核对记录。"
+            reviewCandidate.removeAllItems(); reviewCandidate.addItem(withTitle: "等待当前目录的重复开关候选")
+            for key in reviewIDs { reviewEvidence[key]?.stringValue = "等待当前数据目录的本轮检查。" }
             updateFolderLabel(); reloadReports()
         }
     }
@@ -287,13 +539,14 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let key = room + "\n" + name
         let connection = address + "\n" + identifier.lowercased()
         if let previous = baselineConnection, previous != connection {
-            baselineKey = nil; baselineHasCompleteReport = false
-            baselineReview.state = .off; baselineReview.isEnabled = false
+            baselineKey = nil; activeReviewFile = nil; activeReviewPassed = false
+            reviewGate.stringValue = "连接信息已更换。请先采首组或载入对应主机的有效核对记录。"
             collectionID = UUID().uuidString; baselineConnection = nil
         }
         if let first = baselineKey, key != first,
-           (!baselineHasCompleteReport || baselineReview.state != .on) {
-            alert("先核对第一组", "先完成第一组的重复App开关、面板变化与肉眼亮灭对照，以及重进App状态回读。完整报告生成后仍需人工复核，并勾选首组核对声明，才换其它灯。收到ACK不算状态确认；也可保持原灯名补采。"); return
+           (!activeReviewPassed || activeReviewFile == nil) {
+            tabs.selectedSegment = 4; changePage()
+            alert("先完成首组核对", "请在首组核对页逐项查看证据、选择结论并填写依据。全部必要项人工通过、机器检查合格且原件未改变后，才能换其它灯；也可保持原灯名补采。经验业主可以自行复核。"); return
         }
         var v4 = in_addr(); var v6 = in6_addr()
         guard inet_pton(AF_INET, address, &v4) == 1 || inet_pton(AF_INET6, address, &v6) == 1 else {
@@ -306,7 +559,7 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         var arguments = ["--host-ip", address, "--udid", identifier,
             "--target-label", name, "--room-label", room, "--collection-id", collectionID]
-        if baselineReview.state == .on { arguments.append("--baseline-reviewed") }
+        if activeReviewPassed, let review = activeReviewFile { arguments += ["--review-file", review.path] }
         start(mode: "capture", arguments: arguments)
         if busy {
             if baselineKey == nil { baselineKey = key }
@@ -340,6 +593,7 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let input = Pipe(), output = Pipe(), error = Pipe()
         process.standardInput = input; process.standardOutput = output; process.standardError = error
         worker = process; inputPipe = input; finishedEvent = false; lastFinishedOK = false
+        lastReviewMessage = nil
         capturePreflightPassed = false
         lastCollectionFailedCount = 0
         lastCaptureStatus = nil; lastError = ""; isStopping = false; activeMode = mode; stderrTail = ""
@@ -427,11 +681,30 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
             if let path = event["report_dir"] as? String {
                 lastReport = URL(fileURLWithPath: path, isDirectory: true)
-                reloadReports(); tabs.selectedSegment = 3; changePage()
+                if let session = event["session_dir"] as? String { reportSessions[path] = URL(fileURLWithPath: session, isDirectory: true) }
+                reloadReports()
+                if event["baseline_assessment"] is [String: Any] {
+                    prepareReview(lastReport!, session: reportSessions[path]); tabs.selectedSegment = 4
+                } else { tabs.selectedSegment = 3 }
+                changePage()
             }
             status.stringValue = "报告已保留在本机。完整报告、原始样本只私下处理。"
+        case "review_saved":
+            receiveReview(event["validation"] as? [String: Any] ?? [:], path: event["record_path"] as? String)
+        case "review_validation":
+            receiveReview(event, path: event["review_file"] as? String)
+        case "ha_handoff":
+            if let path = event["directory"] as? String {
+                handoffDirectory = URL(fileURLWithPath: path, isDirectory: true)
+                haSummary.string = "私有HA接入研究包已生成：\(handoffDirectory!.lastPathComponent)\n\n包含首组复核记录、完整私有报告、原件索引、单灯离线状态内核与接入步骤。\n\n可以据此继续编写和验证适配器。认证、端口、命令编码及会话参数仍留空；此包不能直接安装为HA集成，也不授权未知控制。\n\n先完成单灯HA开关、面板同步、掉线不可用和重连回读，再逐步扩展。全部文件仅存本机，不上传。"
+                lastReviewMessage = "HA接入研究包已生成，实际适配及现场控制仍待验证。"
+                tabs.selectedSegment = 5; changePage()
+            }
         case "error":
             lastError = event["message"] as? String ?? "工具未完成，请保留提示。"
+            if activeMode == "capture" && lastError.contains("首组核对") {
+                activeReviewPassed = false; activeReviewFile = nil; reviewGate.stringValue = lastError
+            }
             appendLog(lastError); logPanel?.isHidden = false; status.stringValue = lastError
         case "finished":
             finishedEvent = true
@@ -445,6 +718,7 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             if ok && lastCollectionFailedCount > 0 {
                 status.stringValue = "汇总文件已生成，但有\(lastCollectionFailedCount)轮失败；请逐轮查看缺口，不能视为采样或对准通过。"
             }
+            if ok, let message = lastReviewMessage { status.stringValue = message }
         default: appendLog("未知工具事件已忽略。")
         }
     }
@@ -477,10 +751,6 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if activeMode == "capture", capturePreflightPassed,
            (!finishedEvent || lastCaptureStatus == nil || lastCaptureStatus == "cleanup_incomplete") {
             captureCleanupUncertain = true
-        }
-        if activeMode == "capture", activeCaptureKey == baselineKey,
-           lastFinishedOK, lastCaptureStatus == "completed" {
-            baselineHasCompleteReport = true; baselineReview.isEnabled = true
         }
         activeCaptureKey = nil
         stopButton.isEnabled = false; progress.stopAnimation(nil); progress.isIndeterminate = false
@@ -529,7 +799,7 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return labels[text(value)] ?? text(value)
     }
     private func evidenceStatus(_ value: Any?) -> String {
-        let labels = ["limited": "存在限制", "reviewable": "可供人工复核", "blocked": "受阻", "pass": "通过", "warn": "需注意", "fail": "未通过", "recorded": "记录完整", "completed": "记录完成", "partial": "部分记录", "skipped": "已跳过", "incomplete": "不完整"]
+        let labels = ["ready": "自动条件齐备", "pending": "待验证", "resample": "需补采", "limited": "存在限制", "reviewable": "可供人工复核", "blocked": "受阻", "pass": "通过", "warn": "需注意", "fail": "未通过", "recorded": "记录完整", "completed": "记录完成", "partial": "部分记录", "skipped": "已跳过", "incomplete": "不完整"]
         return labels[text(value)] ?? text(value)
     }
 
