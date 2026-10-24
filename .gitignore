@@ -47,3 +47,5 @@ __pycache__/
 /private_adapter_recipes/
 /private_sampling_plans/
 /private_session_workbenches/
+/private_first_light_flows/
+/private_driver_profiles/

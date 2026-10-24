@@ -449,7 +449,7 @@ def _validated(path, root, expected_host=None):
         raise ValueError('HA向导格式或ID不符')
     _observations(state.get('observations'))
     if state['simulation']:
-        if any(state.get(key) for key in ('driver', 'adapter_manifest', 'bundle', 'diagnostics', 'installation', 'baseline_review')):
+        if any(state.get(key) for key in ('driver', 'adapter_manifest', 'bundle', 'diagnostics', 'installation', 'baseline_review', 'builtin_profile')):
             raise ValueError('演示不得包含真实基线、驱动、安装包、诊断或安装通过声明')
     else:
         address = ipaddress.ip_address(state.get('host_ip'))
@@ -464,6 +464,10 @@ def _validated(path, root, expected_host=None):
         _, driver = _asset_path(state, 'driver', path)
         _, manifest = _asset_path(state, 'adapter_manifest', path)
         _manifest(_json(manifest), driver, state)
+    if state.get('builtin_profile'):
+        if not state.get('driver'):
+            raise ValueError('内置策略缺少固定驱动')
+        _builtin_profile(state, root, path)
     if state.get('bundle'):
         _asset_path(state, 'bundle', path)
         if not state.get('driver') or not isinstance(state.get('package_id'), str) or not re.fullmatch(r'[0-9a-f]{32}', state['package_id']):
@@ -595,7 +599,9 @@ def import_adapter(wizard_file, manifest_path, driver_path, data_root):
     return _store_adapter(root, path, old_raw, state, manifest_raw, driver_raw)
 
 
-def _store_adapter(root, path, old_raw, state, manifest_raw, driver_raw):
+def _store_adapter(root, path, old_raw, state, manifest_raw, driver_raw, preserve_builtin=False):
+    if not preserve_builtin:
+        state.pop('builtin_profile', None)
     token = uuid.uuid4().hex
     manifest_name, driver_name = 'adapter_' + token + '.json', 'driver_' + token + '.py'
     _write(path.parent / manifest_name, manifest_raw)
@@ -624,6 +630,57 @@ def import_driver(wizard_file, driver_path, data_root, evidence):
     return _store_adapter(root, path, old_raw, state, _raw_json(manifest), driver_raw)
 
 
+def _builtin_profile(state, root, path):
+    """Recheck fixed matcher evidence; the saved credential check is an attestation."""
+    try:
+        from . import driver_profile
+    except ImportError:
+        import driver_profile
+    _, raw = _asset_path(state, 'builtin_profile', path)
+    record = driver_profile.validate_saved_profile(
+        path.parent / state['builtin_profile']['file'], root)
+    _, review = _real_review(state, root)
+    if (record.get('package_eligible') is not True or record.get('simulation') is not False
+            or record.get('target_ip') != state['host_ip']
+            or record.get('selected_identifier') != state['selected_identifier']
+            or record.get('target_context') != state['target_context']
+            or any(record['source_bindings'].get(name) != review['input_integrity'].get(name)
+                   for name in baseline.INPUT_LIMITS)):
+        raise ValueError('内置策略未绑定同一组已核对原件；不能生成单灯包')
+    return _json(raw)['profile']
+
+
+def import_builtin_profile(wizard_file, profile_file, data_root):
+    """Bind our fixed driver without requiring an owner to supply Python code."""
+    try:
+        from . import driver_profile
+    except ImportError:
+        import driver_profile
+    root, path, old_raw, state = _validated(wizard_file, data_root)
+    if state['simulation']:
+        raise ValueError('合成向导不能生成真实驱动')
+    record = driver_profile.validate_saved_profile(profile_file, root)
+    raw_profile = baseline._read_file(profile_file, MAX_JSON)
+    profile_name = 'builtin_profile_' + uuid.uuid4().hex + '.json'
+    # Validate source paths before the copied location changes.
+    _write(path.parent / profile_name, raw_profile)
+    state['builtin_profile'] = dict(file=profile_name, **_digest(raw_profile))
+    _builtin_profile(state, root, path)
+    driver_path = Path(__file__).absolute().parent / 'single_light_driver.py'
+    driver_raw = baseline._read_file(driver_path, MAX_DRIVER)
+    evidence = dict(protocol='固定明文SHCP策略；两轮原件连接及服务端口匹配，运行待验收。',
+        session='显式160=0、空连接请求、12/13账户认证；本机输入编码唯一匹配，凭据未保存；现场新认证仍待验证。',
+        commands='同组完整标识；固定light-on/off与新递增序号；原件开关对照通过，实物待验收。',
+        independent_state='单设备48查询与独立04回包关联；面板/重进原件对照通过；HA八步现场仍待验收。')
+    manifest = dict(schema_version=VERSION, artifact='private_mc7021_driver_manifest', driver_api=1,
+        host_ip=state['host_ip'], selected_identifier=state['selected_identifier'],
+        baseline_review_sha256=state['baseline_review']['sha256'],
+        baseline_input_integrity=state['baseline_input_integrity'], driver_sha256=hashlib.sha256(driver_raw).hexdigest(),
+        simulation=False, evidence=evidence, builtin_strategy='plain_shcp_account_v1', household_verified=False)
+    _manifest(manifest, driver_raw, state)
+    return _store_adapter(root, path, old_raw, state, _raw_json(manifest), driver_raw, preserve_builtin=True)
+
+
 def build_bundle(wizard_file, data_root):
     root, path, old_raw, state = _validated(wizard_file, data_root)
     if state['simulation'] or not state.get('driver'):
@@ -636,6 +693,8 @@ def build_bundle(wizard_file, data_root):
     binding = dict(schema_version=VERSION, host_ip=state['host_ip'], target_identifier=state['selected_identifier'],
         driver_sha256=state['driver']['sha256'], baseline_review_sha256=state['baseline_review']['sha256'],
         package_id=package_id, wizard_id=state['wizard_id'], simulation=False)
+    if state.get('builtin_profile'):
+        binding['builtin_profile'] = _builtin_profile(state, root, path)
     copied['custom_components/mc7021_single_light/binding.json'] = _raw_json(binding)
     copied['安装与验收.txt'] = ('只针对本户这一组普通灯；保留原主机和面板。\n'
         '1. 完整解压，将custom_components/mc7021_single_light复制到HA配置目录的custom_components中；如已有同名组件，先备份并人工审阅差异。\n'

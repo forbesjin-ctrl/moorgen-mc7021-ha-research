@@ -17,6 +17,7 @@ import unittest
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'tools'))
 TEMPLATE = ROOT / 'ha_component_templates/custom_components/mc7021_single_light'
 PACKAGE = '_offline_mc7021_component'
 package = types.ModuleType(PACKAGE)
@@ -93,6 +94,16 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.bridge.available)
         self.assertIsNone(self.bridge.power)
         self.assertEqual(self.drivers, [])
+
+    async def test_runtime_fatal_protocol_change_pauses_automatic_reconnect(self):
+        driver = await self.connect(False)
+        driver.fatal_setup_error = True
+        driver.on_disconnect()
+        self.assertTrue(self.bridge.manual_pause)
+        self.now += 1000
+        await self.bridge.async_maintain()
+        self.assertEqual(len(self.drivers), 1)
+        self.assertFalse(self.bridge.available)
 
     async def test_connect_queries_exactly_the_bound_host_and_one_identifier(self):
         driver = await self.connect(None)
@@ -409,6 +420,19 @@ class InstallContractTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             contract.inspect_install(self.directory)
 
+    def test_builtin_profile_may_not_smuggle_credentials_or_unknown_strategy(self):
+        import single_light_driver
+        profile = dict(single_light_driver._FIXED_PROFILE, port=12345,
+            target_identifier=IDENTIFIER, auth_password_transform='raw_ascii')
+        self.install(builtin_profile=profile)
+        self.assertEqual(contract.inspect_install(self.directory)[0]['builtin_profile'], profile)
+        for updates in ({'password': 'synthetic-should-never-be-in-binding'}, {'port': True},
+                        {'conn_response_encryption_selector': 1}, {'target_identifier': 'f' * 16}):
+            with self.subTest(updates=updates):
+                self.install(builtin_profile=dict(profile, **updates))
+                with self.assertRaises(ValueError):
+                    contract.inspect_install(self.directory)
+
     def test_symlinked_driver_is_rejected(self):
         target = self.directory / 'real.py'
         target.write_bytes(self.raw)
@@ -434,7 +458,7 @@ def fake_ha_modules():
     modules = {}
     for name in ('homeassistant', 'homeassistant.config_entries', 'homeassistant.const',
                  'homeassistant.exceptions', 'homeassistant.helpers', 'homeassistant.helpers.event',
-                 'homeassistant.helpers.entity', 'homeassistant.components',
+                 'homeassistant.helpers.entity', 'homeassistant.helpers.selector', 'homeassistant.components',
                  'homeassistant.components.light', 'homeassistant.components.select',
                  'homeassistant.components.button', 'voluptuous'):
         modules[name] = types.ModuleType(name)
@@ -456,6 +480,11 @@ def fake_ha_modules():
     modules['homeassistant.config_entries'].ConfigFlow = Flow
     modules['homeassistant.const'].Platform = types.SimpleNamespace(LIGHT='light', SELECT='select', BUTTON='button')
     modules['homeassistant.exceptions'].ConfigEntryNotReady = type('ConfigEntryNotReady', (Exception,), {})
+    modules['homeassistant.exceptions'].ConfigEntryError = type('ConfigEntryError', (Exception,), {})
+    modules['homeassistant.helpers'].selector = modules['homeassistant.helpers.selector']
+    modules['homeassistant.helpers.selector'].TextSelectorType = types.SimpleNamespace(PASSWORD='password')
+    modules['homeassistant.helpers.selector'].TextSelectorConfig = lambda **kwargs: kwargs
+    modules['homeassistant.helpers.selector'].TextSelector = lambda config: config
     modules['homeassistant.exceptions'].HomeAssistantError = type('HomeAssistantError', (Exception,), {})
     modules['homeassistant.helpers.event'].async_track_time_interval = lambda *args: lambda: None
     modules['homeassistant.helpers.entity'].EntityCategory = types.SimpleNamespace(DIAGNOSTIC='diagnostic')
@@ -571,6 +600,36 @@ class HAWrapperTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(flow.unique_id, '192.0.2.20_' + IDENTIFIER)
         self.assertEqual(result['data']['package_id'], 'package_test')
         self.assertEqual(result['data']['driver_sha256'], binding()['driver_sha256'])
+
+    async def test_builtin_config_form_masks_password_and_requires_fresh_credentials(self):
+        import single_light_driver
+        data = dict(binding(), builtin_profile=dict(single_light_driver._FIXED_PROFILE,
+            port=12345, target_identifier=IDENTIFIER, auth_password_transform='raw_ascii'))
+        flow = self.flow_module.ConfigFlow(); flow.hass = self.hass
+        values = dict(host='192.0.2.20', name='普通灯', driver_approved=True, enable_single_light_control=True)
+        with mock.patch.object(self.flow_module, 'inspect_install', return_value=(data, b'not executed')):
+            result = await flow.async_step_user(values)
+            self.assertEqual(result['errors']['password'], 'invalid_credentials')
+            password_selector = next(value for key, value in result['data_schema'].items() if key.key == 'password')
+            self.assertEqual(password_selector['type'], 'password')
+            values.update(username='SYNTHETIC_LOCAL_USER', password='SYNTHETIC_LOCAL_PASSWORD')
+            result = await flow.async_step_user(values)
+            self.assertEqual(result['data']['password'], values['password'])
+            self.assertNotIn('builtin_profile', result['data'])
+
+    async def test_permanent_builtin_auth_failure_stops_setup_retry_without_secret_text(self):
+        class FatalDriver(FakeDriver):
+            async def async_connect(self, **kwargs):
+                error = ValueError('SYNTHETIC_CREDENTIAL_MUST_NOT_LEAK')
+                error.fatal_setup = True
+                raise error
+        self.entry.data.update(host='192.0.2.20', package_id='package_test',
+            driver_approved=True, enable_single_light_control=True)
+        with mock.patch.object(self.entrypoint, 'inspect_install', return_value=(binding(), b'not executed')), \
+             mock.patch.object(self.entrypoint, 'load_approved_driver', return_value=FatalDriver):
+            with self.assertRaises(self.entrypoint.ConfigEntryError) as caught:
+                await self.entrypoint.async_setup_entry(self.hass, self.entry)
+        self.assertNotIn('SYNTHETIC_CREDENTIAL', str(caught.exception))
 
     async def test_config_flow_mismatched_host_or_invalid_package_is_rejected(self):
         flow = self.flow_module.ConfigFlow()

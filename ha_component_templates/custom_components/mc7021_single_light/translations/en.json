@@ -4,19 +4,22 @@
     "step": {
       "user": {
         "title": "Approve one reviewed ordinary light",
-        "description": "Confirm the private driver source, version, purpose and test notes before trusting this version. You do not need to write Python. It executes with full Python permissions in HA; static checks do not prove safety or protocol correctness. Only the bound known host and this one ordinary light are enabled. No discovery or manufacturer configuration changes. A new independent readback is required after each connection.\n\nComplete light identifier: {identifier}. Driver SHA-256: {driver_sha256}.",
+        "description": "Confirm the private driver source, version, purpose and test notes before trusting this version. You do not need to write Python. It executes with full Python permissions in HA; static checks do not prove safety or protocol correctness. Only the bound known host and this one ordinary light are enabled. No discovery or manufacturer configuration changes. A new independent readback is required after each connection.\n\nComplete light identifier: {identifier}. Driver SHA-256: {driver_sha256}.\n\nThe built-in experimental driver requires fresh local account credentials, stored only in your own HA configuration. The Mac package contains no credentials. Unsupported negotiation or rejected authentication stops retries. To correct credentials, disable/remove this single-light HA entry and add it again; manufacturer configuration is unchanged.\n\nCaptured and bound TCP port: {port}.",
         "data": {
           "host": "Reviewed host IP bound to this package",
           "name": "Name of this one light",
           "driver_approved": "I confirm the driver source and trust this version after reading its purpose and test notes",
-          "enable_single_light_control": "I am on site and authorize readback and commands for this one light"
+          "enable_single_light_control": "I am on site and authorize readback and commands for this one light",
+          "username": "Current local account username",
+          "password": "Current local account password"
         }
       }
     },
     "error": {
       "host_mismatch": "The IP must match the reviewed private package.",
       "invalid_name": "Enter a single-light name between 1 and 64 characters.",
-      "approval_required": "Explicit driver trust and on-site single-light authorization are required."
+      "approval_required": "Explicit driver trust and on-site single-light authorization are required.",
+      "invalid_credentials": "Enter known legitimate local account credentials (1–128 printable ASCII characters). Stop if local credentials are unknown."
     },
     "abort": {
       "invalid_private_package": "Private binding or driver is missing, changed, a placeholder, or invalid. Recheck and regenerate on the Mac.",

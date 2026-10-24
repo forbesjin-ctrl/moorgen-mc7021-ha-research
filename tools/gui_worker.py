@@ -57,6 +57,7 @@ class Protocol:
         self.input = input_stream if input_stream is not None else sys.stdin
         self.output = output_stream if output_stream is not None else sys.stdout
         self.secrets = [str(value) for value in secrets if value]
+        self.credential_secrets = []
         self._output_lock = threading.Lock()
 
     def _clean(self, value):
@@ -72,6 +73,14 @@ class Protocol:
 
     def emit(self, type, **fields):
         payload = self._clean(dict(type=type, **fields))
+        # Credential substrings can be short and occur in file paths/IDs. Never
+        # rewrite routing fields; only free-form error/log messages need this
+        # defense in addition to fixed sanitized credential errors.
+        if type in ('log', 'error'):
+            for key in ('text', 'message'):
+                if isinstance(payload.get(key), str):
+                    for secret in self.credential_secrets:
+                        payload[key] = payload[key].replace(secret, '[已隐藏凭据]')
         line = json.dumps(payload, ensure_ascii=False, allow_nan=False) + '\n'
         with self._output_lock:
             self.output.write(line)
@@ -101,6 +110,31 @@ class Protocol:
         if options and value not in {item['value'] for item in options}:
             raise WorkerError('界面选择无效；本次已停止。')
         return value
+
+    def request_credentials(self):
+        """One private pipe response; never argv, environment, disk or logs."""
+        identifier = uuid.uuid4().hex
+        self.emit('credential_prompt', id=identifier, text=(
+            '仅在本机核对你知道的本户当前合法用户名和密码。工具只比较原样文本、MD5小写/大写三种固定编码；'
+            '不尝试登录、不破解。输入仅在本次进程内存使用，不保存，也不从抓包自动填入。'
+            '不知道本地凭据、仅有云账号或不愿输入时，结束并保留待软件支持。'))
+        line = self.input.readline(MAX_INPUT_BYTES + 1)
+        if not line:
+            raise WorkerCancelled('credential_input_EOF')
+        try:
+            response = json.loads(line, object_pairs_hook=_unique_json_object)
+            if response.get('id') == identifier and response.get('value') == 'q':
+                raise WorkerCancelled('credential_cancel')
+            credentials = response['value']
+            if (len(line.encode('utf-8')) > MAX_INPUT_BYTES or not line.endswith('\n')
+                    or set(response) != {'id', 'value'} or response['id'] != identifier
+                    or not isinstance(credentials, dict) or set(credentials) != {'username', 'password'}
+                    or any(not isinstance(v, str) or not 1 <= len(v) <= 128 for v in credentials.values())):
+                raise ValueError
+        except (ValueError, KeyError, TypeError, AttributeError, RecursionError):
+            raise WorkerError('凭据输入格式无效；未保存，也未尝试网络登录。') from None
+        self.credential_secrets.extend(credentials.values())
+        return credentials
 
 
 class JsonLog(io.TextIOBase):
@@ -222,6 +256,14 @@ def make_parser():
     workbench.add_argument('--identifier', default='')
     workbench.add_argument('--comparison-dir', type=Path)
     modes.add_parser('session-workbench-demo')
+    modes.add_parser('first-light-demo')
+    for action in ('flow', 'adapt'):
+        flow = modes.add_parser('first-light-' + action)
+        flow.add_argument('--session-dir', type=Path, required=action == 'adapt')
+        flow.add_argument('--identifier', default='')
+        flow.add_argument('--comparison-dir', type=Path)
+        flow.add_argument('--review-file', type=Path)
+        flow.add_argument('--wizard-file', type=Path)
     recipe = modes.add_parser('local-recipe')
     recipe.add_argument('--session-dir', required=True, type=Path)
     recipe.add_argument('--identifier', required=True)
@@ -488,6 +530,73 @@ def run_session_workbench(args, protocol):
         online_ready=False, driver_generated=False)
 
 
+def run_first_light(args, protocol):
+    try:
+        from . import first_light_flow as flow
+        from . import driver_profile
+        from . import ha_wizard
+    except ImportError:
+        import first_light_flow as flow
+        import driver_profile
+        import ha_wizard
+    directory = getattr(args, 'session_dir', None)
+    comparison = getattr(args, 'comparison_dir', None)
+    identifier = getattr(args, 'identifier', '')
+    review = getattr(args, 'review_file', None)
+    wizard_file = getattr(args, 'wizard_file', None)
+    if args.mode == 'first-light-demo':
+        try:
+            from . import session_workbench
+        except ImportError:
+            import session_workbench
+        directory, comparison = session_workbench.create_demo(args.data_dir)
+        identifier = demo.DEVICE.hex()
+    if args.mode == 'first-light-adapt':
+        # No credential prompt until both originals match the narrow wire
+        # strategy AND the same first-light baseline has been reviewed.
+        profile_path, record = driver_profile.create_profile(directory, args.data_dir,
+            selected_identifier=identifier, comparison_directory=comparison)
+        validation = reviews.validate_review(review, args.data_dir) if review else {}
+        source_record = validation.get('record') or {}
+        same_baseline = (validation.get('valid') is True and validation.get('passed') is True
+            and source_record.get('simulation') is False
+            and source_record.get('host_ip') == record['target_ip']
+            and source_record.get('selected_identifier') == record['selected_identifier']
+            and all(source_record.get('input_integrity', {}).get(name) == record['source_bindings'].get(name)
+                    for name in capture_input_names()))
+        if record.get('wire_compatible') is True and record.get('simulation') is False and same_baseline:
+            credentials = protocol.request_credentials()
+            try:
+                profile_path, record = driver_profile.create_profile(directory, args.data_dir,
+                    selected_identifier=identifier, comparison_directory=comparison, credentials=credentials)
+            finally:
+                credentials.clear()
+        profile_text = driver_profile.render_text(record)
+        if not same_baseline:
+            profile_text += '\n须先在“首组核对”保存同一份真实原件的人工核对通过记录；本次未询问或保存凭据。\n'
+        protocol.emit('driver_profile', json_file=str(profile_path),
+            report_text=bounded_local_text(profile_text), package_eligible=record['package_eligible'],
+            wire_compatible=record['wire_compatible'], online_ready=False,
+            physical_feedback_verified=False, network_access_performed=False)
+        if record.get('package_eligible') is not True or not same_baseline:
+            return
+        wizard_file, _ = ha_wizard.create(review, args.data_dir)
+        ha_wizard.import_builtin_profile(wizard_file, profile_path, args.data_dir)
+        wizard_file, state = ha_wizard.build_bundle(wizard_file, args.data_dir)
+        protocol.emit('ha_wizard', wizard_file=str(wizard_file), state=state, valid=True, errors=[])
+        protocol.emit('log', text='固定内置实验驱动已匹配并打包；Mac未加载驱动、未连接设备。请在HA界面输入当前合法凭据，明确启用并做八步实物验收。')
+        return
+    path, record = flow.refresh_flow(directory, args.data_dir,
+        selected_identifier=identifier, comparison_directory=comparison,
+        review_file=review, wizard_file=wizard_file)
+    summary = flow.worker_summary(record)
+    summary['candidate_list_truncated'] = len(summary['candidate_identifiers']) > 256
+    summary['candidate_identifiers'] = summary['candidate_identifiers'][:256]
+    protocol.emit('first_light_flow', json_file=str(path),
+        session_dir=str(directory) if directory else None,
+        comparison_dir=str(comparison) if comparison else None, **summary)
+
+
 def capture_input_names():
     return ('session.json', 'events.jsonl', 'traffic.pcap')
 
@@ -641,6 +750,12 @@ def run_capture(args, protocol, backend_factory=None):
         protocol.emit('error', message='采样原件已保留，离线分析未完成：' + str(error),
                       session_dir=str(journal.directory))
         return False
+    try:
+        run_first_light(argparse.Namespace(mode='first-light-flow', data_dir=args.data_dir,
+            session_dir=journal.directory, comparison_dir=None, identifier='',
+            review_file=args.review_file, wizard_file=None), protocol)
+    except (ValueError, OSError):
+        protocol.emit('log', text='采样及原报告已保存；全过程概览未完成，请在“首灯流程”重新读取原件。')
     return status in completed_statuses
 
 
@@ -695,6 +810,9 @@ def run(argv=None, protocol=None, backend_factory=None):
                     ok = True
                 elif args.mode in ('session-workbench', 'session-workbench-demo'):
                     run_session_workbench(args, protocol)
+                    ok = True
+                elif args.mode in ('first-light-flow', 'first-light-demo', 'first-light-adapt'):
+                    run_first_light(args, protocol)
                     ok = True
                 elif args.mode in ('sampling-plan', 'sampling-prepare'):
                     emit_sampling_plan(protocol, args.session_dir, args.data_dir,

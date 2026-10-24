@@ -117,6 +117,8 @@ class SingleLightBridge:
             self._needs_readback = True
             self._pending_power = None
             self._next_reconnect = self.clock() + RECONNECT_INTERVAL
+            if getattr(self._driver, 'fatal_setup_error', False) is True:
+                self.manual_pause = True
             self._event('unavailable', 'disconnected')
             self._notify()
         return disconnected
@@ -151,9 +153,12 @@ class SingleLightBridge:
                 self._event('connected', 'connected')
                 self._notify()
                 await self._request_locked()
-            except BaseException:
+            except BaseException as error:
                 await self._disconnect_locked(log=True)
                 self._next_reconnect = self.clock() + RECONNECT_INTERVAL
+                if getattr(error, 'fatal_setup', False) is True:
+                    self.manual_pause = True
+                    self._event('unavailable', 'disconnected')
                 raise
 
     async def _disconnect_locked(self, *, log=True):

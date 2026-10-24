@@ -8,7 +8,16 @@ final class ReviewDocumentView: NSView { override var isFlipped: Bool { true } }
 final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var window: NSWindow!
     private var pages: [NSView] = []
-    private let tabs = NSSegmentedControl(labels: ["演示", "采样", "分析", "报告", "首组核对", "HA接入"], trackingMode: .selectOne, target: nil, action: nil)
+    private let tabs = NSSegmentedControl(labels: ["演示", "采样", "分析", "报告", "首组核对", "HA接入", "首灯流程"], trackingMode: .selectOne, target: nil, action: nil)
+    private var firstLightSession: URL?
+    private var firstLightComparison: URL?
+    private var firstLightRecord: [String: Any] = [:]
+    private let firstLightTarget = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let firstLightTasks = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let firstLightText = NSTextView()
+    private let credentialUser = NSTextField(string: "")
+    private let credentialPassword = NSSecureTextField(string: "")
+    private var credentialRow: NSStackView?
     private let status = NSTextField(wrappingLabelWithString: "就绪。先选演示，可以体验完整流程。")
     private let folderLabel = NSTextField(wrappingLabelWithString: "首次使用时选择本机数据文件夹。")
     private let host = NSTextField(string: "")
@@ -124,7 +133,7 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
            FileManager.default.fileExists(atPath: path) { dataDirectory = URL(fileURLWithPath: path, isDirectory: true) }
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1040, height: 800),
                           styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
-        window.title = "MC7021 研究工具 · v0.9.0"
+        window.title = "MC7021 研究工具 · v0.10.0"
         window.minSize = NSSize(width: 920, height: 740)
         window.delegate = self
         let content = window.contentView!
@@ -138,7 +147,7 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             root.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -20)])
         root.addArrangedSubview(label("摩根 MC7021 · 逐灯采样与研究", 24, .semibold))
         root.addArrangedSubview(label("保留原主机和面板。代码公开，住户抓包及完整报告只存本机、私下处理。", 13, .regular))
-        tabs.target = self; tabs.action = #selector(changePage); tabs.selectedSegment = 0
+        tabs.target = self; tabs.action = #selector(changePage); tabs.selectedSegment = 6
         tabs.setAccessibilityIdentifier("main-navigation")
         root.addArrangedSubview(tabs)
         let container = NSView(); container.translatesAutoresizingMaskIntoConstraints = false
@@ -146,7 +155,7 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         root.addArrangedSubview(container)
         container.widthAnchor.constraint(equalTo: root.widthAnchor).isActive = true
         container.heightAnchor.constraint(greaterThanOrEqualToConstant: 245).isActive = true
-        for page in [makeDemoPage(), makeCapturePage(), makeAnalysisPage(), makeReportsPage(), makeReviewPage(), makeHAPage()] {
+        for page in [makeDemoPage(), makeCapturePage(), makeAnalysisPage(), makeReportsPage(), makeReviewPage(), makeHAPage(), makeFirstLightPage()] {
             page.translatesAutoresizingMaskIntoConstraints = false
             page.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .vertical)
             container.addSubview(page)
@@ -165,6 +174,11 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         for item in [stepTitle, instruction, promptText] { task.addArrangedSubview(item); item.widthAnchor.constraint(equalTo: task.widthAnchor).isActive = true }
         promptButtons.orientation = .horizontal; promptButtons.spacing = 8
         task.addArrangedSubview(promptButtons)
+        credentialUser.placeholderString = "本户当前合法用户名"; credentialUser.setAccessibilityLabel("本地凭据用户名")
+        credentialPassword.placeholderString = "本户当前合法密码（不保存）"; credentialPassword.setAccessibilityLabel("本地凭据密码")
+        let credentials = NSStackView(views: [credentialUser, credentialPassword, button("仅本机核对并继续", #selector(submitCredentials))]); credentials.spacing = 10
+        credentials.isHidden = true; credentialRow = credentials; task.addArrangedSubview(credentials)
+        credentials.widthAnchor.constraint(equalTo: task.widthAnchor).isActive = true
         promptInput.placeholderString = "需要文字输入时在这里填写"; promptInput.isHidden = true
         task.addArrangedSubview(promptInput)
         let taskRow = NSStackView(); taskRow.orientation = .horizontal; taskRow.spacing = 14
@@ -222,6 +236,125 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             contents.topAnchor.constraint(equalTo: wrapper.topAnchor),
             contents.bottomAnchor.constraint(lessThanOrEqualTo: wrapper.bottomAnchor)])
         return wrapper
+    }
+
+    private func makeFirstLightPage() -> NSView {
+        firstLightTarget.addItem(withTitle: "先读取采样，再选择完整灯标识")
+        firstLightTarget.setAccessibilityLabel("首灯流程完整对象")
+        firstLightTarget.target = self; firstLightTarget.action = #selector(firstLightTargetChanged)
+        firstLightTasks.addItem(withTitle: "全过程概览")
+        firstLightTasks.setAccessibilityLabel("首灯流程缺口任务")
+        firstLightTasks.target = self; firstLightTasks.action = #selector(showFirstLightTask)
+        firstLightText.font = .systemFont(ofSize: 13)
+        firstLightText.string = "从这里完成首组灯的采样、原件复核、内置驱动匹配、HA安装及八步真实状态验收。\n\n首次点“检查并继续”；可以先演示。所有资料保存在自己选择的本机文件夹。\n当前没有任何住户实机通过记录。支持范围之外会列出补采或软件缺口，不能自动宣称接通。"
+        let report = scrollText(firstLightText)
+        report.heightAnchor.constraint(equalToConstant: 230).isActive = true
+        let actions = NSStackView(views: [button("检查并继续", #selector(refreshFirstLight)), button("选择首轮原件…", #selector(chooseFirstLight)), button("加入独立第二轮…", #selector(compareFirstLight)), button("演示首灯流程", #selector(demoFirstLight))]); actions.spacing = 8
+        let next = NSStackView(views: [button("执行所选下一步", #selector(routeFirstLight)), button("重新读取原件", #selector(refreshFirstLight)), button("单灯HA向导", #selector(showFirstLightHA))]); next.spacing = 10
+        let result = stack([label("首组普通灯 · 从采样到HA验收", 20, .semibold), label("按当前下一步操作。每次重新检查原件；明文匹配时由内置实现生成单灯包，无需编写Python。加密、未知会话或凭据不匹配时保留待支持。资料不上传。", 13), actions, firstLightTarget, firstLightTasks, report, next])
+        report.widthAnchor.constraint(equalTo: result.widthAnchor).isActive = true
+        let scroll = NSScrollView(); scroll.hasVerticalScroller = true
+        let document = ReviewDocumentView(); scroll.documentView = document
+        document.translatesAutoresizingMaskIntoConstraints = false; result.translatesAutoresizingMaskIntoConstraints = false
+        document.addSubview(result)
+        NSLayoutConstraint.activate([document.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor), result.leadingAnchor.constraint(equalTo: document.leadingAnchor), result.trailingAnchor.constraint(equalTo: document.trailingAnchor, constant: -12), result.topAnchor.constraint(equalTo: document.topAnchor, constant: 4), result.bottomAnchor.constraint(equalTo: document.bottomAnchor, constant: -10)])
+        return scroll
+    }
+
+    private func firstLightArguments() -> [String] {
+        var arguments: [String] = []
+        if let session = firstLightSession { arguments += ["--session-dir", session.path] }
+        if let second = firstLightComparison { arguments += ["--comparison-dir", second.path] }
+        if let identifier = firstLightTarget.selectedItem?.representedObject as? String { arguments += ["--identifier", identifier] }
+        if let review = activeReviewFile { arguments += ["--review-file", review.path] }
+        if let file = wizardFile { arguments += ["--wizard-file", file.path] }
+        return arguments
+    }
+    @objc private func refreshFirstLight() { guard !busy else { return }; start(mode: "first-light-flow", arguments: firstLightArguments()) }
+    @objc private func demoFirstLight() { guard !busy else { return }; start(mode: "first-light-demo", arguments: []) }
+    @objc private func chooseFirstLight() {
+        guard !busy, let root = requireDataDirectory() else { return }
+        let panel = NSOpenPanel(); panel.title = "选择首组灯完整原件文件夹"; panel.directoryURL = root
+        panel.canChooseFiles = false; panel.canChooseDirectories = true
+        guard panel.runModal() == .OK, let selected = panel.url else { return }
+        firstLightSession = selected; firstLightComparison = nil; firstLightRecord = [:]
+        firstLightTarget.removeAllItems(); firstLightTarget.addItem(withTitle: "重新读取后选择完整标识")
+        refreshFirstLight()
+    }
+    @objc private func compareFirstLight() {
+        guard !busy, firstLightSession != nil, let root = requireDataDirectory() else { return }
+        let panel = NSOpenPanel(); panel.title = "选择同户同灯独立第二轮原件"; panel.directoryURL = root
+        panel.message = "按同一组灯完整步骤重新采一轮；不能复制首轮。原件仍只在本机。"
+        panel.canChooseFiles = false; panel.canChooseDirectories = true
+        guard panel.runModal() == .OK, let selected = panel.url else { return }
+        firstLightComparison = selected; refreshFirstLight()
+    }
+    private func receiveFirstLight(_ event: [String: Any]) {
+        firstLightRecord = event
+        if let path = event["session_dir"] as? String { firstLightSession = URL(fileURLWithPath: path, isDirectory: true) }
+        firstLightComparison = (event["comparison_dir"] as? String).map { URL(fileURLWithPath: $0, isDirectory: true) }
+        let selected = event["selected_identifier"] as? String ?? ""
+        firstLightTarget.removeAllItems(); firstLightTarget.addItem(withTitle: "请选择对应本组灯的完整标识；不自动选首项")
+        for value in event["candidate_identifiers"] as? [String] ?? [] {
+            firstLightTarget.addItem(withTitle: value); firstLightTarget.lastItem?.representedObject = value
+            if value == selected { firstLightTarget.select(firstLightTarget.lastItem) }
+        }
+        if !selected.isEmpty, firstLightTarget.selectedItem?.representedObject as? String != selected {
+            firstLightTarget.addItem(withTitle: selected); firstLightTarget.lastItem?.representedObject = selected
+            firstLightTarget.select(firstLightTarget.lastItem)
+        }
+        firstLightTasks.removeAllItems(); firstLightTasks.addItem(withTitle: "全过程概览（当前下一步）")
+        for task in event["tasks"] as? [[String: Any]] ?? [] {
+            firstLightTasks.addItem(withTitle: "\(task["status_label"] as? String ?? "待验证") · \(task["title"] as? String ?? "缺口")")
+            firstLightTasks.lastItem?.representedObject = task
+        }
+        firstLightText.string = event["report_text"] as? String ?? "缺少流程结果，请重新检查原件。"
+        if event["candidate_list_truncated"] as? Bool == true { firstLightText.string += "\n候选超过界面256项上限；完整列表在本机JSON，已保留当前所选标识。不能凭第一项猜灯。" }
+        samplingPlanWindow?.close(); sessionWorkbenchWindow?.close()
+        tabs.selectedSegment = 6; changePage()
+    }
+    @objc private func firstLightTargetChanged() {
+        firstLightRecord = [:]
+        firstLightText.string = "对象已改变，请点“重新读取原件”。未重算前不能沿用原对象结论或继续生成包。"
+    }
+    @objc private func showFirstLightTask() {
+        guard let task = firstLightTasks.selectedItem?.representedObject as? [String: Any] else {
+            firstLightText.string = firstLightRecord["report_text"] as? String ?? "请先重新读取原件。"; return
+        }
+        firstLightText.string = "\(task["title"] as? String ?? "缺口") · \(task["status_label"] as? String ?? "待验证")\n\n" + ((task["instructions"] as? [String] ?? []).joined(separator: "\n\n"))
+    }
+    @objc private func showFirstLightHA() { tabs.selectedSegment = 5; changePage() }
+    @objc private func routeFirstLight() {
+        guard !busy, !firstLightRecord.isEmpty else { return }
+        let task = firstLightTasks.selectedItem?.representedObject as? [String: Any] ?? firstLightRecord["next_action"] as? [String: Any] ?? [:]
+        switch task["action"] as? String {
+        case "prepare_capture":
+            guard task["capture_allowed"] as? Bool == true else { showFirstLightTask(); return }
+            if let session = firstLightSession {
+                var arguments = ["--session-dir", session.path]
+                if let id = firstLightRecord["selected_identifier"] as? String { arguments += ["--identifier", id] }
+                if let second = firstLightComparison { arguments += ["--comparison-dir", second.path] }
+                start(mode: "sampling-plan", arguments: arguments)
+            } else { tabs.selectedSegment = 1; changePage() }
+        case "select_identifier": firstLightText.string = "从上方完整标识列表选择实际对应这组灯的候选，再点“重新读取原件”。"
+        case "review_baseline":
+            if let root = dataDirectory, let artifacts = firstLightRecord["artifacts"] as? [String: Any], let path = artifacts["report_directory"] as? String {
+                prepareReview(root.appendingPathComponent(path), session: firstLightSession); tabs.selectedSegment = 4; changePage()
+            }
+        case "open_session_workbench", "software_support":
+            if let session = firstLightSession {
+                var arguments = ["--session-dir", session.path]
+                if let id = firstLightRecord["selected_identifier"] as? String { arguments += ["--identifier", id] }
+                if let second = firstLightComparison { arguments += ["--comparison-dir", second.path] }
+                start(mode: "session-workbench", arguments: arguments)
+            }
+        case "match_driver":
+            guard firstLightSession != nil else { return }
+            start(mode: "first-light-adapt", arguments: firstLightArguments())
+        case "build_ha_bundle": buildHABundle()
+        case "open_ha_wizard", "record_installation", "record_ha_acceptance": showFirstLightHA()
+        default: showFirstLightTask()
+        }
     }
 
     private func makeDemoPage() -> NSView {
@@ -337,7 +470,7 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSLayoutConstraint.activate([document.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor), body.leadingAnchor.constraint(equalTo: document.leadingAnchor, constant: 2), body.trailingAnchor.constraint(equalTo: document.trailingAnchor, constant: -12), body.topAnchor.constraint(equalTo: document.topAnchor, constant: 6), body.bottomAnchor.constraint(equalTo: document.bottomAnchor, constant: -12)])
         func add(_ view: NSView) { body.addArrangedSubview(view); view.widthAnchor.constraint(equalTo: body.widthAnchor).isActive = true }
         add(label("单灯 HA 接入向导 · 五步保存进度", 20, .semibold))
-        add(label("默认在业主自己的电脑和HA环境处理，原件无需经过我们。普通自助需要基础电脑与HA操作能力，不需要写Python；有匹配且经过验证的驱动后再安装验收。目前尚无已验证摩根驱动，缺驱动时停在准备阶段。", 13))
+        add(label("资料留在业主自己的电脑与HA。先在“首灯流程”核对两轮原件，匹配内置实验驱动并生成包，再在HA明确启用、逐项验收；不需要写Python。当前尚无住宅实机通过记录，未知策略继续保留待支持。", 13))
         let navigation = NSStackView(views: [button("自助前检查", #selector(selfServiceReadiness)), button("新建单灯接入向导", #selector(createHAWizard)), button("载入向导进度…", #selector(loadHAWizard)), button("演示HA向导", #selector(demoHAWizard))]); navigation.spacing = 8; add(navigation)
         haStepPicker.addItems(withTitles: ["1 · 首组和灯路", "2 · 核对适配驱动", "3 · 安装并配置HA", "4 · 单灯真实状态验收", "5 · 验收报告"])
         haStepPicker.target = self; haStepPicker.action = #selector(changeHAStep); haStepPicker.setAccessibilityLabel("HA向导步骤"); add(haStepPicker); add(haStatus)
@@ -568,7 +701,8 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if let directory = sessionWorkbenchDirectory { NSWorkspace.shared.activateFileViewerSelecting([directory]) }
     }
     @objc private func sessionWorkbenchHAConditions() {
-        alert("候选策略仍须实现与验证", "本工作台不生成联网驱动、不复制旧认证报文或固定序号。未知加密、动态密钥、合法新凭据和会话生命周期可能仍需软件支持。只有已有完整且匹配的实现、首组核对通过后，才使用HA向导导入并明确启用同一灯；再做四次HA开关、面板反馈、断线不可用和新连接当前读回八项验收。离线一致不能自动填写通过。")
+        sessionWorkbenchText?.string = "继续接入请回主窗口“首灯流程”重新检查。\n\n内置驱动只匹配明文、固定账号字段和已核对的独立读回方式。未知加密、动态密钥或其他认证方式保留待软件支持；不复制旧认证报文。匹配后还需要在HA输入当前合法凭据、明确启用这一组灯，并完成四次HA开关、面板反馈、断线不可用和新连接读回八项验收。离线一致不能自动填为通过。"
+        sessionWorkbenchText?.scrollToBeginningOfDocument(nil)
     }
     private func receiveSessionWorkbench(_ event: [String: Any]) {
         guard event["online_ready"] as? Bool == false, event["driver_generated"] as? Bool == false,
@@ -749,7 +883,8 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         haStatus.stringValue = valid ? (simulated ? "演示可练习流程，不能安装真实驱动或通过验收。" : "进度已保存；驱动接口检查不等于代码安全或物理状态认证。") : "向导来源已失效，先重新核对原件，不能继续安装或验收。"
         if let installation = value["installation"] as? [String: Any] { haEntityID.stringValue = installation["entity_id"] as? String ?? ""; haInstallNotes.stringValue = installation["notes"] as? String ?? "" } else { haEntityID.stringValue = ""; haInstallNotes.stringValue = "" }
         if activeMode == "ha-wizard-create" || activeMode == "ha-wizard-demo" { haStepPicker.selectItem(at: 0) }
-        else if activeMode == "ha-wizard-driver" || activeMode == "ha-wizard-adapter" || activeMode == "ha-wizard-bundle" { haStepPicker.selectItem(at: 2) }
+        else if activeMode == "ha-wizard-driver" || activeMode == "ha-wizard-adapter" || activeMode == "ha-wizard-bundle" || activeMode == "first-light-adapt" { haStepPicker.selectItem(at: 2) }
+        else if activeMode == "ha-wizard-load" { haStepPicker.selectItem(at: ["adapter": 1, "bundle": 2, "installation": 2, "acceptance": 3, "complete": 4][value["stage"] as? String ?? ""] ?? 0) }
         else if activeMode == "ha-wizard-install" || activeMode == "ha-wizard-diagnostics" { haStepPicker.selectItem(at: 3) }
         else if activeMode == "ha-wizard-acceptance", assessment["passed"] as? Bool == true { haStepPicker.selectItem(at: 4) }
         changeHAStep(); changeHACase(); tabs.selectedSegment = 5; changePage(); lastReviewMessage = haStatus.stringValue
@@ -959,6 +1094,10 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             adaptationSession = nil; adaptationDirectory = nil; adaptationReport = ""; adaptationTarget.removeAllItems(); adaptationTarget.addItem(withTitle: "先分析，再选择本组完整对象标识")
             samplingPlanSession = nil; samplingPlanFile = nil; samplingPlanComparison = nil; samplingPlanIdentifier = ""; samplingPlanTasks = []; samplingPlanText = ""; samplingPlanSimulation = true; samplingPlanWindow?.close(); samplingFocus.stringValue = ""
             sessionWorkbenchSession = nil; sessionWorkbenchComparison = nil; sessionWorkbenchDirectory = nil; sessionWorkbenchIdentifier = ""; sessionWorkbenchAnalyzedIdentifier = ""; sessionWorkbenchReport = ""; sessionWorkbenchTasks = []; sessionWorkbenchWindow?.close()
+            firstLightSession = nil; firstLightComparison = nil; firstLightRecord = [:]
+            firstLightTarget.removeAllItems(); firstLightTarget.addItem(withTitle: "请重新读取本机原件")
+            firstLightTasks.removeAllItems(); firstLightTasks.addItem(withTitle: "全过程概览")
+            firstLightText.string = "数据文件夹已更换，请重新检查首组流程。旧目录的目标、凭据核对及HA结论不沿用。"
             handoffDirectory = nil; haStatus.stringValue = "数据目录已更换，请载入本目录中有效的首组核对记录。"
             reviewCandidate.removeAllItems(); reviewCandidate.addItem(withTitle: "等待当前目录的重复开关候选")
             for key in reviewIDs { reviewEvidence[key]?.stringValue = "等待当前数据目录的本轮检查。" }
@@ -1075,7 +1214,10 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         outputQueue.async { [weak self] in
             var buffer = Data()
             while true {
-                let chunk = output.fileHandleForReading.readData(ofLength: 4096)
+                // availableData returns the currently available pipe bytes.
+                // readData(ofLength:) can wait for 4096 bytes while the worker
+                // is waiting for this GUI to answer a shorter prompt.
+                let chunk = output.fileHandleForReading.availableData
                 if chunk.isEmpty { break }
                 buffer.append(chunk)
                 if buffer.count > 4 * 1024 * 1024 { DispatchQueue.main.async { self?.protocolFailure() }; break }
@@ -1092,7 +1234,7 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         errorQueue.async { [weak self] in
             while true {
-                let chunk = error.fileHandleForReading.readData(ofLength: 4096)
+                let chunk = error.fileHandleForReading.availableData
                 if chunk.isEmpty { break }
                 let text = String(data: chunk, encoding: .utf8) ?? ""
                 DispatchQueue.main.async { self?.stderrTail = String(((self?.stderrTail ?? "") + text).suffix(4000)) }
@@ -1110,6 +1252,7 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func clearPrompt() {
         for item in promptButtons.arrangedSubviews { promptButtons.removeArrangedSubview(item); item.removeFromSuperview() }
         promptValues.removeAll(); promptInput.isHidden = true; pendingPrompt = nil
+        credentialRow?.isHidden = true; credentialUser.stringValue = ""; credentialPassword.stringValue = ""
     }
 
     private func receive(_ event: [String: Any]) {
@@ -1135,6 +1278,12 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 promptInput.isHidden = false; promptInput.stringValue = event["default_value"] as? String ?? ""
                 promptButtons.addArrangedSubview(button("提交", #selector(submitText)))
             }
+        case "credential_prompt":
+            clearPrompt(); pendingPrompt = event["id"] as? String
+            promptText.stringValue = event["text"] as? String ?? "本机凭据核对；不保存"
+            credentialRow?.isHidden = false
+            promptButtons.addArrangedSubview(button("跳过，保持待支持", #selector(cancelCredentials)))
+            window.makeKeyAndOrderFront(nil); window.makeFirstResponder(credentialUser)
         case "progress":
             if let remaining = event["remaining_seconds"] as? NSNumber {
                 progress.isIndeterminate = false; progress.maxValue = max(progress.maxValue, remaining.doubleValue)
@@ -1142,6 +1291,7 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 status.stringValue = "正在观察，剩余 \(remaining.intValue) 秒。"
             }
         case "result":
+            if let path = event["session_dir"] as? String { firstLightSession = URL(fileURLWithPath: path, isDirectory: true) }
             lastCaptureStatus = event["capture_status"] as? String
             if event["report_kind"] as? String == "collection", let summary = event["summary"] as? [String: Any] {
                 lastCollectionFailedCount = (summary["failed_count"] as? NSNumber)?.intValue ?? 0
@@ -1170,6 +1320,11 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             receiveSamplingPreparation(event)
         case "session_workbench":
             receiveSessionWorkbench(event)
+        case "first_light_flow":
+            receiveFirstLight(event)
+        case "driver_profile":
+            firstLightText.string = event["report_text"] as? String ?? "驱动匹配尚未完成。"
+            tabs.selectedSegment = 6; changePage()
         case "ha_handoff":
             if let path = event["directory"] as? String {
                 handoffDirectory = URL(fileURLWithPath: path, isDirectory: true)
@@ -1204,6 +1359,15 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if let value = promptValues[ObjectIdentifier(sender)] { sendAnswer(value) }
     }
     @objc private func submitText() { sendAnswer(promptInput.stringValue) }
+    @objc private func cancelCredentials() { sendAnswer("q") }
+    @objc private func submitCredentials() {
+        guard let identifier = pendingPrompt, let pipe = inputPipe else { return }
+        do {
+            var data = try JSONSerialization.data(withJSONObject: ["id": identifier, "value": ["username": credentialUser.stringValue, "password": credentialPassword.stringValue]])
+            data.append(10); try pipe.fileHandleForWriting.write(contentsOf: data)
+            clearPrompt(); promptText.stringValue = "仅在本机内存核对；未尝试网络登录。"
+        } catch { clearPrompt(); stopTask() }
+    }
     private func sendAnswer(_ value: String) {
         guard let identifier = pendingPrompt, let pipe = inputPipe else { return }
         do {

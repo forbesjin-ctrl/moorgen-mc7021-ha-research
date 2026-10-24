@@ -38,6 +38,9 @@ PUBLIC_FILES = frozenset({
     'tests/test_local_adaptation_worker.py',
     'tools/sampling_gaps.py', 'tests/test_sampling_gaps.py', 'tests/test_sampling_gaps_worker.py', 'docs/SAMPLING_GAPS.md',
     'tools/session_workbench.py', 'tests/test_session_workbench.py', 'tests/test_session_workbench_worker.py', 'docs/SESSION_WORKBENCH.md',
+    'tools/first_light_flow.py', 'tools/driver_profile.py', 'tools/single_light_driver.py',
+    'tests/test_first_light_flow.py', 'tests/test_driver_profile.py', 'tests/test_single_light_driver.py',
+    'tests/test_first_light_worker.py', 'tests/test_first_light_end_to_end.py', 'docs/FIRST_LIGHT_FLOW.md',
     'ha_component_templates/README.md',
     'ha_component_templates/custom_components/mc7021_single_light/__init__.py',
     'ha_component_templates/custom_components/mc7021_single_light/manifest.json',
@@ -57,7 +60,7 @@ PUBLIC_FILES = frozenset({
     '.github/ISSUE_TEMPLATE/config.yml', '.github/workflows/offline.yml',
 })
 PRIVATE_DIRS = frozenset({'.git', 'captures', 'demo_runs', 'demo_collections', 'private_reports', 'baseline_reviews', 'private_reviews', 'private_ha_handoffs', 'private_ha_wizards', 'private_ha_forms', 'private_local_adaptations', 'private_adapter_recipes', 'private_sampling_plans',
-    'private_samples', 'private_session_workbenches', 'work', 'artifacts', '__pycache__'})
+    'private_samples', 'private_session_workbenches', 'private_first_light_flows', 'private_driver_profiles', 'work', 'artifacts', '__pycache__'})
 FAKE_UDIDS = frozenset({'00000001-0000000000000001', '00000000-0000000000000000'})
 DOC_NETWORKS = tuple(ipaddress.ip_network(x) for x in
                      ['192.0.2.0/24', '198.51.100.0/24', '203.0.113.0/24'])

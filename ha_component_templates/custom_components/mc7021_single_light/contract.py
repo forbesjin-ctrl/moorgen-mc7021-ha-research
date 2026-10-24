@@ -17,6 +17,26 @@ import types
 from .const import DRIVER_API_VERSION, VERSION
 
 
+def inspect_builtin_profile(value, identifier):
+    """Fixed data schema only; no packet/auth values can enter this binding."""
+    fixed = dict(schema_version='1.0', strategy='plain_shcp_account_v1', protocol_number=1,
+        protocol_name='dooyashcp', ordinary_light_confirmed=True, conn_request_fields=[],
+        conn_response_encryption_selector=0, auth_request_fields=[12, 13],
+        credential_input_kind='owner_supplied_account_credentials', credentials_verified_against_sources=True,
+        serial_strategy='client_increment_mod65536', query_strategy='single_device_48',
+        readback_correlation='query_serial_echo', state_strategy='ordinary_light_bit0',
+        heartbeat_strategy='request_13_response_14_fresh_serial', evidence_status='source_matched_two_rounds')
+    if not isinstance(value, dict) or set(value) != set(fixed) | {'port', 'target_identifier', 'auth_password_transform'}:
+        raise ValueError('Unsupported built-in profile')
+    if any(type(value[key]) is not type(expected) or value[key] != expected for key, expected in fixed.items()):
+        raise ValueError('Unsupported built-in strategy')
+    if (type(value['port']) is not int or not 1 <= value['port'] <= 65535
+            or value['target_identifier'] != identifier
+            or value['auth_password_transform'] not in ('raw_ascii', 'md5_hex_lower', 'md5_hex_upper')):
+        raise ValueError('Invalid source-matched target or credentials encoding')
+    return value
+
+
 def inspect_install(directory=None):
     directory = Path(directory) if directory else Path(__file__).parent
     paths = [directory / 'binding.json', directory / 'driver.py']
@@ -50,6 +70,8 @@ def inspect_install(directory=None):
             raise ValueError('Missing package/wizard identity')
     if hashlib.sha256(raw[1]).hexdigest() != binding['driver_sha256']:
         raise ValueError('Driver changed after packaging')
+    if 'builtin_profile' in binding:
+        inspect_builtin_profile(binding['builtin_profile'], binding['target_identifier'])
     tree = ast.parse(raw[1])
     constants = {}
     for item in tree.body:
