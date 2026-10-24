@@ -36,6 +36,7 @@ PUBLIC_FILES = frozenset({
     'docs/HA_WIZARD.md', 'docs/SELF_SERVICE.md', 'docs/LOCAL_ADAPTATION.md',
     'tools/local_adaptation.py', 'tools/adapter_recipe.py', 'tests/test_local_adaptation.py', 'tests/test_adapter_recipe.py',
     'tests/test_local_adaptation_worker.py',
+    'tools/sampling_gaps.py', 'tests/test_sampling_gaps.py', 'tests/test_sampling_gaps_worker.py', 'docs/SAMPLING_GAPS.md',
     'ha_component_templates/README.md',
     'ha_component_templates/custom_components/mc7021_single_light/__init__.py',
     'ha_component_templates/custom_components/mc7021_single_light/manifest.json',
@@ -54,7 +55,7 @@ PUBLIC_FILES = frozenset({
     '.github/ISSUE_TEMPLATE/compatibility.yml', '.github/ISSUE_TEMPLATE/bug_report.md',
     '.github/ISSUE_TEMPLATE/config.yml', '.github/workflows/offline.yml',
 })
-PRIVATE_DIRS = frozenset({'.git', 'captures', 'demo_runs', 'demo_collections', 'private_reports', 'baseline_reviews', 'private_reviews', 'private_ha_handoffs', 'private_ha_wizards', 'private_ha_forms', 'private_local_adaptations', 'private_adapter_recipes',
+PRIVATE_DIRS = frozenset({'.git', 'captures', 'demo_runs', 'demo_collections', 'private_reports', 'baseline_reviews', 'private_reviews', 'private_ha_handoffs', 'private_ha_wizards', 'private_ha_forms', 'private_local_adaptations', 'private_adapter_recipes', 'private_sampling_plans',
                          'private_samples', 'work', 'artifacts', '__pycache__'})
 FAKE_UDIDS = frozenset({'00000001-0000000000000001', '00000000-0000000000000000'})
 DOC_NETWORKS = tuple(ipaddress.ip_network(x) for x in

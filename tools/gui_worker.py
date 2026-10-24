@@ -221,6 +221,14 @@ def make_parser():
     recipe.add_argument('--session-dir', required=True, type=Path)
     recipe.add_argument('--identifier', required=True)
     recipe.add_argument('--holdout-dir', type=Path)
+    for action in ('plan', 'prepare'):
+        gap = modes.add_parser('sampling-' + action)
+        gap.add_argument('--session-dir', required=True, type=Path)
+        gap.add_argument('--identifier', default='')
+        gap.add_argument('--comparison-dir', type=Path)
+        if action == 'prepare':
+            gap.add_argument('--task-id', required=True)
+            gap.add_argument('--plan-file', required=True, type=Path)
     sampling = modes.add_parser('capture')
     sampling.add_argument('--host-ip', required=True)
     sampling.add_argument('--udid', required=True)
@@ -289,6 +297,7 @@ def analyze_and_emit(protocol, directory, data_dir, ordinary_ids=(), capture_sta
         source=report.get('source', {}), target_context=report.get('target_context'),
         baseline_assessment=reviews.assess_report(report),
         review_draft=reviews.draft_review(report))
+    maybe_emit_sampling_plan(protocol, directory, data_dir)
     return report
 
 
@@ -362,6 +371,8 @@ def run_local_adaptation(args, protocol):
             session_dir=str(args.session_dir.absolute()), recipe_file=str(path),
             report_text=bounded_local_text(recipe.render_text(record)), candidates=[args.identifier],
             online_ready=False, kind='codec_recipe')
+        maybe_emit_sampling_plan(protocol, args.session_dir, args.data_dir,
+            args.identifier, args.holdout_dir)
         return
     directory = (demo.create_demo_sample(args.data_dir / 'demo_runs')
                  if args.mode == 'local-adapt-demo' else args.session_dir)
@@ -376,6 +387,83 @@ def run_local_adaptation(args, protocol):
         session_dir=str(Path(directory).absolute()), report_text=bounded_local_text(adaptation.render_text(record)),
         candidates=candidates[:256], candidate_list_truncated=len(candidates) > 256,
         online_ready=False, kind='local_analysis')
+    maybe_emit_sampling_plan(protocol, directory, args.data_dir)
+
+
+def emit_sampling_plan(protocol, directory, root, identifier='', comparison=None, prepare_task=None, prior_plan=None):
+    try:
+        from . import sampling_gaps as gaps
+    except ImportError:
+        import sampling_gaps as gaps
+    previous = None
+    if prepare_task is not None:
+        previous = read_sampling_plan(prior_plan, root)
+        selected = reviews._identifier(previous.get('selected_identifier'))
+        if selected is None or (identifier and identifier.lower() != selected):
+            raise WorkerError('原计划没有唯一完整对象或选择已经变化；请先重新分析和核对本组标识。')
+        identifier = selected
+    path, record = gaps.create_plan(directory, root, selected_identifier=identifier,
+        comparison_directory=comparison)
+    if prepare_task is not None:
+        for key in ('primary', 'comparison'):
+            old, new = previous.get(key), record.get(key)
+            if (old is None) != (new is None):
+                raise WorkerError('补采比较来源已改变，请先生成新的缺口计划。')
+            if old is None:
+                continue
+            if not isinstance(old, dict) or not isinstance(new, dict):
+                raise WorkerError('原计划来源格式无效，请重新生成。')
+            if old.get('source_paths', {}).get('session_dir') != new.get('source_paths', {}).get('session_dir'):
+                raise WorkerError('补采原件目录与原计划不同，请先重新分析。')
+            for name in capture_input_names():
+                if old.get('source_bindings', {}).get(name) != new.get('source_bindings', {}).get(name):
+                    raise WorkerError('原计划绑定的采样原件已改变，请重新分析；未准备补采。')
+        context = capture.validate_target_context(record.get('target_context'))
+        if context is None or reviews._identifier(record.get('selected_identifier')) is None:
+            raise WorkerError('缺少完整对象或有效普通灯标签，不能自动准备；请先人工确认同组来源。')
+        task = next((item for item in record['tasks'] if item['id'] == prepare_task), None)
+        if (record.get('simulation') is not False or task is None
+                or task.get('category') != 'recapture' or task.get('capture_allowed') is not True):
+            raise WorkerError('此项不能用自动补采准备解决：合成、人工核对或软件尚未支持的项目不会解锁采样。')
+        protocol.emit('sampling_preparation', session_dir=str(Path(directory).absolute()),
+            plan_file=str(path), target_ip=capture.validate_ip(record['target_ip']),
+            target_context=context,
+            task_id=task['id'], task_title=task['title'], instructions=task['instructions'],
+            capture_started=False, network_access_performed=False, online_ready=False)
+        return
+    protocol.emit('sampling_plan', session_dir=str(Path(directory).absolute()), plan_file=str(path),
+        selected_identifier=record.get('selected_identifier') or '', comparison_dir=str(Path(comparison).absolute()) if comparison else None,
+        report_text=bounded_local_text(gaps.render_text(record)),
+        tasks=[dict(task, ui_text=gaps.render_task_text(record, task['id'])) for task in record['tasks']],
+        simulation=record['simulation'], online_ready=False)
+
+
+def capture_input_names():
+    return ('session.json', 'events.jsonl', 'traffic.pcap')
+
+
+def read_sampling_plan(path, root):
+    """Use the previous record only as a source binding, never as permission."""
+    if path is None:
+        raise WorkerError('缺少原缺口计划，请先重新分析。')
+    path, root = reviews._safe_path(path), reviews._safe_path(root)
+    if (path.name != 'plan.json' or path.parent.parent != root / 'private_sampling_plans'
+            or not re.fullmatch(r'plan_[0-9a-f]{32}', path.parent.name)):
+        raise WorkerError('请选择本机private_sampling_plans直属计划文件。')
+    raw = reviews._read_file(path, 16 * 1024 * 1024)
+    value = json.loads(raw.decode('utf-8'), object_pairs_hook=_unique_json_object,
+        parse_constant=lambda _: (_ for _ in ()).throw(ValueError('无效计划数值')))
+    if not isinstance(value, dict) or value.get('artifact') != 'private_mc7021_sampling_gap_plan':
+        raise WorkerError('本机计划格式不正确，请重新生成。')
+    return value
+
+
+def maybe_emit_sampling_plan(protocol, directory, root, identifier='', comparison=None):
+    """A gap-plan failure must not erase or relabel a completed sample report."""
+    try:
+        emit_sampling_plan(protocol, directory, root, identifier, comparison)
+    except (ValueError, OSError) as error:
+        protocol.emit('log', text='原报告已保留，未生成补采计划：' + str(error))
 
 
 def bounded_local_text(value):
@@ -554,6 +642,12 @@ def run(argv=None, protocol=None, backend_factory=None):
                     ok = True
                 elif args.mode in ('local-adapt', 'local-adapt-demo', 'local-recipe'):
                     run_local_adaptation(args, protocol)
+                    ok = True
+                elif args.mode in ('sampling-plan', 'sampling-prepare'):
+                    emit_sampling_plan(protocol, args.session_dir, args.data_dir,
+                        args.identifier, args.comparison_dir,
+                        args.task_id if args.mode == 'sampling-prepare' else None,
+                        args.plan_file if args.mode == 'sampling-prepare' else None)
                     ok = True
                 elif args.mode.startswith('ha-wizard-'):
                     run_ha_wizard(args, protocol)

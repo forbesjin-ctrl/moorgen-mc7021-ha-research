@@ -45,6 +45,18 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var adaptationDirectory: URL?
     private var adaptationReport = ""
     private let adaptationTarget = NSPopUpButton(frame: .zero, pullsDown: false)
+    private var samplingPlanSession: URL?
+    private var samplingPlanFile: URL?
+    private var samplingPlanComparison: URL?
+    private var samplingPlanIdentifier = ""
+    private var samplingPlanTasks: [[String: Any]] = []
+    private var samplingPlanText = ""
+    private var samplingPlanSimulation = true
+    private var samplingPlanWindow: NSWindow?
+    private var samplingTaskPicker: NSPopUpButton?
+    private var samplingTaskText: NSTextView?
+    private var samplingPrepareButton: NSButton?
+    private let samplingFocus = NSTextField(wrappingLabelWithString: "")
     private var haDriverEvidence: [String: NSTextField] = [:]
     private let haStepPicker = NSPopUpButton(frame: .zero, pullsDown: false)
     private var haStepViews: [NSView] = []
@@ -101,7 +113,7 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
            FileManager.default.fileExists(atPath: path) { dataDirectory = URL(fileURLWithPath: path, isDirectory: true) }
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1040, height: 800),
                           styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
-        window.title = "MC7021 研究工具 · v0.7.0"
+        window.title = "MC7021 研究工具 · v0.8.0"
         window.minSize = NSSize(width: 920, height: 740)
         window.delegate = self
         let content = window.contentView!
@@ -226,7 +238,7 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let result = stack([label("可以采多盏，每轮只操作一组", 20, .semibold),
             label("需要人在这套房子里，iPhone 连平时的家庭 Wi-Fi，USB 接 Mac 并信任。原厂 App 和面板本来就能正常控制这组灯。\n只做正常 App / 面板操作，不扫描、不修改配置、不涉及场景、总断电或安防。", 13),
             label("先采第一组并人工对准请求、面板变化、肉眼状态与App回读，再逐组扩展。每轮独立保存；报告成功不自动确认身份或状态。IP/UDID可在本次打开期间复用。", 12),
-            grid, consent, reviewGate, button("开始本轮采样", #selector(startCapture)), tools])
+            grid, samplingFocus, consent, reviewGate, button("开始本轮采样", #selector(startCapture)), tools])
         grid.widthAnchor.constraint(equalTo: result.widthAnchor).isActive = true
         captureContents = result
         return topAligned(result)
@@ -237,6 +249,7 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             label("选择包含 session.json、events.jsonl、traffic.pcap 的完整采样文件夹。原件只读，无需手机或管理员权限。"),
             button("选择采样文件夹并分析…", #selector(startAnalysis)),
             button("汇总本机多轮采样", #selector(startCollection)),
+            button("查看缺口与补采向导", #selector(refreshSamplingGaps)),
             label("汇总当前数据文件夹的captures目录，每一轮独立分析。旧样本无灯名时显示未知；相同报文标识只提示冲突，不自动合并为同一灯。", 12),
             label("报告会检查完整性、关联操作时间线，并区分开关请求、执行应答、ACK 和状态候选。不能识别或证据不足时保留未知。", 13)]))
     }
@@ -325,6 +338,7 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         adapter.addArrangedSubview(button("生成编解码配方并离线核对", #selector(createLocalRecipe)))
         adapter.addArrangedSubview(button("选择第二轮样本作离线对照…", #selector(compareLocalRecipe)))
         adapter.addArrangedSubview(button("在Finder查看私有适配档案", #selector(revealLocalAdaptation)))
+        adapter.addArrangedSubview(button("缺口与补采向导", #selector(refreshSamplingGaps)))
         let developerToggle = NSButton(checkboxWithTitle: "显示协议开发者工具（普通业主无需）", target: self, action: #selector(toggleHADeveloperTools(_:)))
         developerToggle.setAccessibilityLabel("显示协议开发者工具"); adapter.addArrangedSubview(developerToggle)
         let developer = stack([label("高级开发：仅供协议分析和驱动实现者", 15, .semibold), label("此路径需要会话/认证、命令编码和独立状态的真实证据。模板没有实现摩根协议，不能用勾选代替未知参数。导入源码不在Mac执行；HA启用后具有自定义集成的代码执行权限。", 12), button("导出驱动接口模板", #selector(exportHAStarter))])
@@ -405,6 +419,90 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         haSummary.scrollToBeginningOfDocument(nil); haStatus.stringValue = "已完成本机离线研究；这不是可安装驱动，认证和实灯验证仍需完成。"
         haStepPicker.selectItem(at: 1); changeHAStep(); tabs.selectedSegment = 5; changePage()
         lastReviewMessage = haStatus.stringValue; showLocalAdaptation()
+    }
+
+    @objc private func refreshSamplingGaps() {
+        guard !busy else { return }
+        guard let session = samplingPlanSession ?? adaptationSession ?? reviewSessionDirectory else {
+            alert("先分析一轮本机采样", "采样清理完成或本机分析后自动检查缺口；没有原件时可先演示本机适配。"); return
+        }
+        var arguments = ["--session-dir", session.path]
+        if !samplingPlanIdentifier.isEmpty { arguments += ["--identifier", samplingPlanIdentifier] }
+        if let comparison = samplingPlanComparison { arguments += ["--comparison-dir", comparison.path] }
+        start(mode: "sampling-plan", arguments: arguments)
+    }
+    private func receiveSamplingPlan(_ event: [String: Any]) {
+        guard let path = event["session_dir"] as? String else { return }
+        samplingPlanSession = URL(fileURLWithPath: path, isDirectory: true)
+        samplingPlanFile = (event["plan_file"] as? String).map { URL(fileURLWithPath: $0) }
+        samplingPlanComparison = (event["comparison_dir"] as? String).map { URL(fileURLWithPath: $0, isDirectory: true) }
+        samplingPlanIdentifier = event["selected_identifier"] as? String ?? ""
+        samplingPlanTasks = event["tasks"] as? [[String: Any]] ?? []
+        samplingPlanText = event["report_text"] as? String ?? "未生成有效计划，不能判断充分性。"
+        samplingPlanSimulation = event["simulation"] as? Bool ?? true
+        showSamplingPlanWindow()
+    }
+    private func showSamplingPlanWindow() {
+        samplingPlanWindow?.close()
+        let panel = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 760), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        panel.title = "本机缺口与补采向导 · 不代表驱动已完成"; panel.isReleasedWhenClosed = false
+        let content = NSView(); panel.contentView = content
+        let picker = NSPopUpButton(frame: .zero, pullsDown: false); picker.setAccessibilityLabel("补采或核对任务")
+        picker.addItem(withTitle: "查看全部缺口；请选择一项看具体操作")
+        for task in samplingPlanTasks {
+            let category = ["recapture": "采样证据", "manual_check": "人工核对", "software_support": "软件支持"][task["category"] as? String ?? ""] ?? "待验证"
+            picker.addItem(withTitle: category + " · " + (task["title"] as? String ?? "未知项目")); picker.lastItem?.representedObject = task["id"] as? String
+        }
+        picker.target = self; picker.action = #selector(changeSamplingTask)
+        let text = NSTextView(); text.font = .systemFont(ofSize: 13); text.string = samplingPlanText
+        let scroll = scrollText(text); scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 420).isActive = true
+        let prepare = button("准备同组补采（不启动）", #selector(prepareSamplingTask)); prepare.isEnabled = false
+        let actions = NSStackView(views: [button("重新检查原件与缺口", #selector(refreshSamplingGaps)), prepare]); actions.spacing = 10
+        let body = stack([label("缺什么、为何缺、怎样正常补采", 20, .semibold), label("仅在本机重新检查原件，无需填写密码或令牌。‘已观察到’不代表协议已验证；人工事实和软件未支持的策略不能靠多采或勾选通过。补采准备不会启动接口或家庭通信。", 13), picker, scroll, actions])
+        body.translatesAutoresizingMaskIntoConstraints = false; content.addSubview(body)
+        NSLayoutConstraint.activate([body.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 20), body.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -20), body.topAnchor.constraint(equalTo: content.topAnchor, constant: 20), body.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -20), picker.widthAnchor.constraint(equalTo: body.widthAnchor), scroll.widthAnchor.constraint(equalTo: body.widthAnchor)])
+        samplingTaskPicker = picker; samplingTaskText = text; samplingPrepareButton = prepare; samplingPlanWindow = panel
+        panel.center(); panel.makeKeyAndOrderFront(nil)
+    }
+    @objc private func changeSamplingTask() {
+        guard let id = samplingTaskPicker?.selectedItem?.representedObject as? String,
+              let task = samplingPlanTasks.first(where: { $0["id"] as? String == id }) else {
+            samplingTaskText?.string = samplingPlanText; samplingPrepareButton?.isEnabled = false; return
+        }
+        let statusLabel = ["needs_sample": "需补采", "manual_required": "需人工核对", "software_required": "待软件支持", "evidence_present_unverified": "已有线索，未验证"][task["status"] as? String ?? ""] ?? "未知"
+        var lines = [task["title"] as? String ?? "待验证", "判断：" + statusLabel, "为何：" + (task["why"] as? String ?? "证据不足")]
+        for (key, title) in [("evidence_refs", "本机证据"), ("instructions", "准备与正常操作"), ("expected_evidence", "补采后要检查什么")] {
+            lines += ["", title + "："] + ((task[key] as? [String]) ?? ["请查看本机完整计划。"])
+        }
+        lines += ["", "这不是任务完成勾选。补采后重新分析新原件、做独立第二轮对照；实物仍须现场核对，软件策略仍须实现。"]
+        samplingTaskText?.string = task["ui_text"] as? String ?? lines.joined(separator: "\n"); samplingTaskText?.scrollToBeginningOfDocument(nil)
+        samplingPrepareButton?.isEnabled = !samplingPlanSimulation && task["category"] as? String == "recapture" && task["capture_allowed"] as? Bool == true
+    }
+    @objc private func prepareSamplingTask() {
+        guard !busy else { return }
+        guard !captureCleanupUncertain else { alert("先确认上次清理", "清理状态不明确时不能准备新采样；请保留记录并先人工核对。"); return }
+        guard let session = samplingPlanSession, let file = samplingPlanFile, let id = samplingTaskPicker?.selectedItem?.representedObject as? String else { return }
+        var arguments = ["--session-dir", session.path, "--task-id", id, "--plan-file", file.path]
+        if !samplingPlanIdentifier.isEmpty { arguments += ["--identifier", samplingPlanIdentifier] }
+        if let comparison = samplingPlanComparison { arguments += ["--comparison-dir", comparison.path] }
+        start(mode: "sampling-prepare", arguments: arguments)
+    }
+    private func receiveSamplingPreparation(_ event: [String: Any]) {
+        guard event["capture_started"] as? Bool == false, event["network_access_performed"] as? Bool == false,
+              !captureCleanupUncertain, let address = event["target_ip"] as? String else { return }
+        let current = host.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard current.isEmpty || current == address else { alert("主机与当前填写值不同", "未自动更换主机。请从已有资料核对这户已知IP，确认后再准备同组补采；不扫描。"); return }
+        let context = event["target_context"] as? [String: Any]
+        let name = context?["label"] as? String ?? "", room = context?["room"] as? String ?? ""
+        if let first = baselineKey, first != room + "\n" + name {
+            alert("保留原首组限制", "准备动作不会覆盖正在核对的灯名或更换首组。请保持原组补采；不能用新名称绕过核对。"); return
+        }
+        host.stringValue = address; targetName.stringValue = name; targetRoom.stringValue = room; consent.state = .off
+        activeReviewPassed = false; activeReviewFile = nil
+        reviewGate.stringValue = "已准备同组补采，尚未启动。请重新确认现场；旧通过资格未沿用，保留记录可另行载入核验。"
+        samplingFocus.stringValue = "本轮补采重点：" + (event["task_title"] as? String ?? "补齐同组证据") + "\n" + ((event["instructions"] as? [String]) ?? []).joined(separator: "\n") + "\n本轮仍完成同组正常App与面板步骤。确认现场并本人点“开始本轮采样”后才进入原采样流程。"
+        tabs.selectedSegment = 1; changePage(); samplingPlanWindow?.close()
+        lastReviewMessage = "只填写采样准备，未启动采样、RVI或家庭通信。"; status.stringValue = lastReviewMessage!
     }
 
     @objc private func selfServiceReadiness() {
@@ -733,6 +831,7 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             reviewSummary.string = "请先采样或分析一轮，再逐项核对。"; resetReviewForm()
             wizardFile = nil; wizardState = [:]; for field in haDriverEvidence.values { field.stringValue = "" }; haEntityID.stringValue = ""; haInstallNotes.stringValue = ""; changeHACase()
             adaptationSession = nil; adaptationDirectory = nil; adaptationReport = ""; adaptationTarget.removeAllItems(); adaptationTarget.addItem(withTitle: "先分析，再选择本组完整对象标识")
+            samplingPlanSession = nil; samplingPlanFile = nil; samplingPlanComparison = nil; samplingPlanIdentifier = ""; samplingPlanTasks = []; samplingPlanText = ""; samplingPlanSimulation = true; samplingPlanWindow?.close(); samplingFocus.stringValue = ""
             handoffDirectory = nil; haStatus.stringValue = "数据目录已更换，请载入本目录中有效的首组核对记录。"
             reviewCandidate.removeAllItems(); reviewCandidate.addItem(withTitle: "等待当前目录的重复开关候选")
             for key in reviewIDs { reviewEvidence[key]?.stringValue = "等待当前数据目录的本轮检查。" }
@@ -938,6 +1037,10 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             receiveHAWizard(event)
         case "local_adaptation":
             receiveLocalAdaptation(event)
+        case "sampling_plan":
+            receiveSamplingPlan(event)
+        case "sampling_preparation":
+            receiveSamplingPreparation(event)
         case "ha_handoff":
             if let path = event["directory"] as? String {
                 handoffDirectory = URL(fileURLWithPath: path, isDirectory: true)
