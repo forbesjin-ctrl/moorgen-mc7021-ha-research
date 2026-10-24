@@ -214,6 +214,13 @@ def make_parser():
     modes.add_parser('collection-demo')
     analysis = modes.add_parser('analyze')
     analysis.add_argument('--session-dir', required=True, type=Path)
+    adaptation = modes.add_parser('local-adapt')
+    adaptation.add_argument('--session-dir', required=True, type=Path)
+    modes.add_parser('local-adapt-demo')
+    recipe = modes.add_parser('local-recipe')
+    recipe.add_argument('--session-dir', required=True, type=Path)
+    recipe.add_argument('--identifier', required=True)
+    recipe.add_argument('--holdout-dir', type=Path)
     sampling = modes.add_parser('capture')
     sampling.add_argument('--host-ip', required=True)
     sampling.add_argument('--udid', required=True)
@@ -336,6 +343,46 @@ def load_review_form(path, data_root, fields=REVIEW_FORM_FIELDS):
             or not isinstance(form['reviewer_label'], str)):
         raise WorkerError('核对表单字段类型无效，请重新保存。')
     return form
+
+
+def run_local_adaptation(args, protocol):
+    """Fixed local analyzers only; never load plugins, drivers or cloud models."""
+    try:
+        from . import local_adaptation as adaptation
+        from . import adapter_recipe as recipe
+    except ImportError:
+        import local_adaptation as adaptation
+        import adapter_recipe as recipe
+    protocol.emit('step', title='本机无代码适配研究',
+        instruction='从原件重新计算候选并离线比较，不连接设备、不上传、不输出可联网驱动。')
+    if args.mode == 'local-recipe':
+        path, record = recipe.create_recipe(args.session_dir, args.data_dir,
+            selected_identifier=args.identifier, holdout_directory=args.holdout_dir)
+        protocol.emit('local_adaptation', directory=str(path.parent),
+            session_dir=str(args.session_dir.absolute()), recipe_file=str(path),
+            report_text=bounded_local_text(recipe.render_text(record)), candidates=[args.identifier],
+            online_ready=False, kind='codec_recipe')
+        return
+    directory = (demo.create_demo_sample(args.data_dir / 'demo_runs')
+                 if args.mode == 'local-adapt-demo' else args.session_dir)
+    directory = reviews._safe_path(directory)
+    if not reviews._under(directory, args.data_dir):
+        raise WorkerError('请选择本机数据目录内的完整采样；可用Finder复制完整原件到该目录，不修改文件内容。')
+    report_dir, _ = analyze_session(directory, output_root=args.data_dir / 'private_reports')
+    destination, record = adaptation.analyze_adaptation(directory, report_dir, args.data_dir)
+    candidates = [item.get('identifier_hex') for item in record.get('device_candidates', [])
+                  if isinstance(item, dict) and reviews._identifier(item.get('identifier_hex'))]
+    protocol.emit('local_adaptation', directory=str(destination),
+        session_dir=str(Path(directory).absolute()), report_text=bounded_local_text(adaptation.render_text(record)),
+        candidates=candidates[:256], candidate_list_truncated=len(candidates) > 256,
+        online_ready=False, kind='local_analysis')
+
+
+def bounded_local_text(value):
+    """Keep one worker event within the native UI's line-size budget."""
+    text = str(value)
+    return (text[:200000] + '\n\n界面内容达到上限；请在Finder查看本机完整档案，不能把截断部分视为通过。'
+            if len(text) > 200000 else text)
 
 
 def run_ha_wizard(args, protocol):
@@ -504,6 +551,9 @@ def run(argv=None, protocol=None, backend_factory=None):
                     ok = True
                 elif args.mode == 'analyze':
                     analyze_and_emit(protocol, args.session_dir, args.data_dir)
+                    ok = True
+                elif args.mode in ('local-adapt', 'local-adapt-demo', 'local-recipe'):
+                    run_local_adaptation(args, protocol)
                     ok = True
                 elif args.mode.startswith('ha-wizard-'):
                     run_ha_wizard(args, protocol)

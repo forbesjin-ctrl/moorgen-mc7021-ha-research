@@ -41,6 +41,10 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var wizardFile: URL?
     private var wizardState: [String: Any] = [:]
     private var haDeveloperTools: NSView?
+    private var adaptationSession: URL?
+    private var adaptationDirectory: URL?
+    private var adaptationReport = ""
+    private let adaptationTarget = NSPopUpButton(frame: .zero, pullsDown: false)
     private var haDriverEvidence: [String: NSTextField] = [:]
     private let haStepPicker = NSPopUpButton(frame: .zero, pullsDown: false)
     private var haStepViews: [NSView] = []
@@ -97,7 +101,7 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
            FileManager.default.fileExists(atPath: path) { dataDirectory = URL(fileURLWithPath: path, isDirectory: true) }
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1040, height: 800),
                           styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
-        window.title = "MC7021 研究工具 · v0.6.2"
+        window.title = "MC7021 研究工具 · v0.7.0"
         window.minSize = NSSize(width: 920, height: 740)
         window.delegate = self
         let content = window.contentView!
@@ -314,6 +318,13 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let summary = scrollText(haSummary); summary.heightAnchor.constraint(equalToConstant: 155).isActive = true; add(summary)
         let first = stack([label("第一步：核对目标", 16, .semibold), label("确认当前MC7021、房间、普通灯及完整对象标识与首组一致。新建、载入、生成包和验收都会重新校验原件；原件改变应重新分析复核。未通过不能安装。", 13), button("保留原研究包（可选）", #selector(exportHAHandoff))])
         let adapter = stack([label("第二步：导入可信驱动材料", 16, .semibold), label("普通业主只需选择可信分析者提供的完整清单JSON和driver.py文件，不需要编辑Python、填写四项协议依据或计算SHA。确认驱动适用本户版本及这组灯；材料不匹配就停止，不修改标识或校验值绕过。接口检查只核对语法与绑定，不认证代码安全或协议正确。", 13), button("导入可信驱动材料…", #selector(importHAAdapter)), button("在Finder查看向导文件", #selector(revealHAWizard))])
+        adapter.addArrangedSubview(label("没有驱动也可先离线研究：选择本户完整采样，工具重算会话、对象和状态证据，生成有限JSON编解码配方，并可与另一轮样本离线对照。无需首组通过、不写Python、不上传；认证/加密及重连策略未支持时不能生成可联网驱动。", 13))
+        let localActions = NSStackView(views: [button("没有匹配驱动：本机分析…", #selector(analyzeLocalAdaptation)), button("演示本机适配", #selector(demoLocalAdaptation)), button("查看本机适配报告", #selector(showLocalAdaptation))]); localActions.spacing = 8; adapter.addArrangedSubview(localActions)
+        adaptationTarget.addItem(withTitle: "先分析，再选择本组完整对象标识")
+        adaptationTarget.setAccessibilityLabel("本机适配对象"); adapter.addArrangedSubview(adaptationTarget)
+        adapter.addArrangedSubview(button("生成编解码配方并离线核对", #selector(createLocalRecipe)))
+        adapter.addArrangedSubview(button("选择第二轮样本作离线对照…", #selector(compareLocalRecipe)))
+        adapter.addArrangedSubview(button("在Finder查看私有适配档案", #selector(revealLocalAdaptation)))
         let developerToggle = NSButton(checkboxWithTitle: "显示协议开发者工具（普通业主无需）", target: self, action: #selector(toggleHADeveloperTools(_:)))
         developerToggle.setAccessibilityLabel("显示协议开发者工具"); adapter.addArrangedSubview(developerToggle)
         let developer = stack([label("高级开发：仅供协议分析和驱动实现者", 15, .semibold), label("此路径需要会话/认证、命令编码和独立状态的真实证据。模板没有实现摩根协议，不能用勾选代替未知参数。导入源码不在Mac执行；HA启用后具有自定义集成的代码执行权限。", 12), button("导出驱动接口模板", #selector(exportHAStarter))])
@@ -338,6 +349,63 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @objc private func toggleHADeveloperTools(_ sender: NSButton) { haDeveloperTools?.isHidden = sender.state != .on }
+
+    @objc private func analyzeLocalAdaptation() {
+        guard !busy, let root = requireDataDirectory() else { return }
+        let panel = NSOpenPanel(); panel.title = "选择本户一组普通灯的完整采样文件夹"
+        panel.message = "只在本机分析；无需首组已通过。请选择本机数据目录内包含session.json、events.jsonl及traffic.pcap的同一轮原件。外部采样先用Finder完整复制到数据目录，不改内容。"; panel.directoryURL = root
+        panel.canChooseFiles = false; panel.canChooseDirectories = true; panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let selected = panel.url else { return }
+        start(mode: "local-adapt", arguments: ["--session-dir", selected.path])
+    }
+    @objc private func demoLocalAdaptation() { start(mode: "local-adapt-demo", arguments: []) }
+    private func selectedLocalTarget() -> (URL, String)? {
+        guard !busy, let session = adaptationSession, let identifier = adaptationTarget.selectedItem?.representedObject as? String else {
+            alert("先分析并选择对象", "请先在本机分析采样，再从候选列表选择本组完整标识。没有候选时按报告补采，不猜地址。"); return nil
+        }
+        return (session, identifier)
+    }
+    @objc private func createLocalRecipe() {
+        guard let (session, identifier) = selectedLocalTarget() else { return }
+        start(mode: "local-recipe", arguments: ["--session-dir", session.path, "--identifier", identifier])
+    }
+    @objc private func compareLocalRecipe() {
+        guard let (session, identifier) = selectedLocalTarget() else { return }
+        let panel = NSOpenPanel(); panel.title = "选择同户同一组灯的另一轮完整采样"
+        panel.message = "请选择本机数据目录内不同PCAP的独立采样；不将复制或同一样本当作第二轮。仅本地离线对照，不连接设备。"; panel.directoryURL = dataDirectory
+        panel.canChooseFiles = false; panel.canChooseDirectories = true; panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let selected = panel.url else { return }
+        start(mode: "local-recipe", arguments: ["--session-dir", session.path, "--identifier", identifier, "--holdout-dir", selected.path])
+    }
+    @objc private func showLocalAdaptation() {
+        guard !adaptationReport.isEmpty else { alert("先生成本机适配报告", "可先演示；正式研究选择自己的完整采样文件夹。"); return }
+        let view = NSTextView(); view.font = .monospacedSystemFont(ofSize: 12, weight: .regular); view.string = adaptationReport
+        let panel = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 980, height: 700), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        panel.title = "本机无代码适配 · 离线证据与缺口"; panel.contentView = scrollText(view)
+        panel.center(); panel.makeKeyAndOrderFront(nil); evidenceWindow = panel
+    }
+    @objc private func revealLocalAdaptation() {
+        guard let directory = adaptationDirectory else { alert("尚无适配档案", "请先分析或生成编解码配方。"); return }
+        NSWorkspace.shared.activateFileViewerSelecting([directory])
+    }
+    private func receiveLocalAdaptation(_ event: [String: Any]) {
+        let previousSession = adaptationSession
+        let previousIdentifier = adaptationTarget.selectedItem?.representedObject as? String
+        if let path = event["session_dir"] as? String { adaptationSession = URL(fileURLWithPath: path, isDirectory: true) }
+        if let path = event["directory"] as? String { adaptationDirectory = URL(fileURLWithPath: path, isDirectory: true) }
+        let previous = (event["kind"] as? String == "codec_recipe" && previousSession == adaptationSession) ? previousIdentifier : nil
+        adaptationTarget.removeAllItems(); adaptationTarget.addItem(withTitle: "请选择本组完整标识；不按灯名猜地址")
+        for identifier in event["candidates"] as? [String] ?? [] {
+            adaptationTarget.addItem(withTitle: identifier); adaptationTarget.lastItem?.representedObject = identifier
+            if identifier == previous { adaptationTarget.select(adaptationTarget.lastItem) }
+        }
+        adaptationReport = event["report_text"] as? String ?? "缺少结果；不能判定适配完成。"
+        if event["candidate_list_truncated"] as? Bool == true { adaptationReport += "\n候选超过界面256项上限。请查看私有完整档案并缩小本组采样范围，不自动选择首项。" }
+        haSummary.string = "本机适配档案已保存，未授权或启动家庭通信。\n\n" + adaptationReport
+        haSummary.scrollToBeginningOfDocument(nil); haStatus.stringValue = "已完成本机离线研究；这不是可安装驱动，认证和实灯验证仍需完成。"
+        haStepPicker.selectItem(at: 1); changeHAStep(); tabs.selectedSegment = 5; changePage()
+        lastReviewMessage = haStatus.stringValue; showLocalAdaptation()
+    }
 
     @objc private func selfServiceReadiness() {
         guard !busy else { return }
@@ -664,6 +732,7 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             reviewReport = nil; reviewReportDirectory = nil; reviewSessionDirectory = nil
             reviewSummary.string = "请先采样或分析一轮，再逐项核对。"; resetReviewForm()
             wizardFile = nil; wizardState = [:]; for field in haDriverEvidence.values { field.stringValue = "" }; haEntityID.stringValue = ""; haInstallNotes.stringValue = ""; changeHACase()
+            adaptationSession = nil; adaptationDirectory = nil; adaptationReport = ""; adaptationTarget.removeAllItems(); adaptationTarget.addItem(withTitle: "先分析，再选择本组完整对象标识")
             handoffDirectory = nil; haStatus.stringValue = "数据目录已更换，请载入本目录中有效的首组核对记录。"
             reviewCandidate.removeAllItems(); reviewCandidate.addItem(withTitle: "等待当前目录的重复开关候选")
             for key in reviewIDs { reviewEvidence[key]?.stringValue = "等待当前数据目录的本轮检查。" }
@@ -867,6 +936,8 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             receiveReview(event, path: event["review_file"] as? String)
         case "ha_wizard":
             receiveHAWizard(event)
+        case "local_adaptation":
+            receiveLocalAdaptation(event)
         case "ha_handoff":
             if let path = event["directory"] as? String {
                 handoffDirectory = URL(fileURLWithPath: path, isDirectory: true)
