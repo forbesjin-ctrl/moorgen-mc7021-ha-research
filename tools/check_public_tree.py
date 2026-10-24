@@ -33,7 +33,7 @@ PUBLIC_FILES = frozenset({
     'tests/test_ha_wizard.py',
     'tests/test_ha_component.py',
     'tests/test_ha_wizard_worker.py',
-    'docs/HA_WIZARD.md',
+    'docs/HA_WIZARD.md', 'docs/SELF_SERVICE.md',
     'ha_component_templates/README.md',
     'ha_component_templates/custom_components/mc7021_single_light/__init__.py',
     'ha_component_templates/custom_components/mc7021_single_light/manifest.json',

@@ -40,6 +40,7 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var handoffDirectory: URL?
     private var wizardFile: URL?
     private var wizardState: [String: Any] = [:]
+    private var haDeveloperTools: NSView?
     private var haDriverEvidence: [String: NSTextField] = [:]
     private let haStepPicker = NSPopUpButton(frame: .zero, pullsDown: false)
     private var haStepViews: [NSView] = []
@@ -96,7 +97,7 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
            FileManager.default.fileExists(atPath: path) { dataDirectory = URL(fileURLWithPath: path, isDirectory: true) }
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1040, height: 800),
                           styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
-        window.title = "MC7021 研究工具 · v0.6.1"
+        window.title = "MC7021 研究工具 · v0.6.2"
         window.minSize = NSSize(width: 920, height: 740)
         window.delegate = self
         let content = window.contentView!
@@ -305,20 +306,22 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSLayoutConstraint.activate([document.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor), body.leadingAnchor.constraint(equalTo: document.leadingAnchor, constant: 2), body.trailingAnchor.constraint(equalTo: document.trailingAnchor, constant: -12), body.topAnchor.constraint(equalTo: document.topAnchor, constant: 6), body.bottomAnchor.constraint(equalTo: document.bottomAnchor, constant: -12)])
         func add(_ view: NSView) { body.addArrangedSubview(view); view.widthAnchor.constraint(equalTo: body.widthAnchor).isActive = true }
         add(label("单灯 HA 接入向导 · 五步保存进度", 20, .semibold))
-        add(label("先有本户真实首组复核，再由有能力的业主提供已核对驱动。Mac只检查文件和证据，不执行导入代码、不连接家庭设备。缺少驱动时停在准备步骤。", 13))
-        let navigation = NSStackView(views: [button("新建单灯接入向导", #selector(createHAWizard)), button("载入向导进度…", #selector(loadHAWizard)), button("演示HA向导", #selector(demoHAWizard))]); navigation.spacing = 8; add(navigation)
+        add(label("默认在业主自己的电脑和HA环境处理，原件无需经过我们。普通自助需要基础电脑与HA操作能力，不需要写Python；有匹配且经过验证的驱动后再安装验收。目前尚无已验证摩根驱动，缺驱动时停在准备阶段。", 13))
+        let navigation = NSStackView(views: [button("自助前检查", #selector(selfServiceReadiness)), button("新建单灯接入向导", #selector(createHAWizard)), button("载入向导进度…", #selector(loadHAWizard)), button("演示HA向导", #selector(demoHAWizard))]); navigation.spacing = 8; add(navigation)
         haStepPicker.addItems(withTitles: ["1 · 首组和灯路", "2 · 核对适配驱动", "3 · 安装并配置HA", "4 · 单灯真实状态验收", "5 · 验收报告"])
         haStepPicker.target = self; haStepPicker.action = #selector(changeHAStep); haStepPicker.setAccessibilityLabel("HA向导步骤"); add(haStepPicker); add(haStatus)
         haSummary.string = "选择演示可以练习流程；正式向导需要首组真实复核记录。各步和现场观察只存本机。"; haSummary.font = .systemFont(ofSize: 12)
         let summary = scrollText(haSummary); summary.heightAnchor.constraint(equalToConstant: 155).isActive = true; add(summary)
         let first = stack([label("第一步：核对目标", 16, .semibold), label("确认当前MC7021、房间、普通灯及完整对象标识与首组一致。新建、载入、生成包和验收都会重新校验原件；原件改变应重新分析复核。未通过不能安装。", 13), button("保留原研究包（可选）", #selector(exportHAHandoff))])
-        let adapter = stack([label("第二步：准备并检查驱动", 16, .semibold), label("导出接口模板后，由有协议与Python经验的业主编写driver.py及清单，说明认证/会话、开关编码和独立状态依据。模板不能直接控制灯。导入只检查语法、接口和绑定，不认证代码安全或协议正确。导入代码将来在HA内具有自定义集成的执行权限，请先自行审阅。", 13), button("导出驱动接口模板", #selector(exportHAStarter))])
+        let adapter = stack([label("第二步：导入可信驱动材料", 16, .semibold), label("普通业主只需选择可信分析者提供的完整清单JSON和driver.py文件，不需要编辑Python、填写四项协议依据或计算SHA。确认驱动适用本户版本及这组灯；材料不匹配就停止，不修改标识或校验值绕过。接口检查只核对语法与绑定，不认证代码安全或协议正确。", 13), button("导入可信驱动材料…", #selector(importHAAdapter)), button("在Finder查看向导文件", #selector(revealHAWizard))])
+        let developerToggle = NSButton(checkboxWithTitle: "显示协议开发者工具（普通业主无需）", target: self, action: #selector(toggleHADeveloperTools(_:)))
+        developerToggle.setAccessibilityLabel("显示协议开发者工具"); adapter.addArrangedSubview(developerToggle)
+        let developer = stack([label("高级开发：仅供协议分析和驱动实现者", 15, .semibold), label("此路径需要会话/认证、命令编码和独立状态的真实证据。模板没有实现摩根协议，不能用勾选代替未知参数。导入源码不在Mac执行；HA启用后具有自定义集成的代码执行权限。", 12), button("导出驱动接口模板", #selector(exportHAStarter))])
         for (key, title) in [("protocol", "连接与协议依据"), ("session", "认证和当前会话依据"), ("commands", "开关命令与序号依据"), ("independent_state", "独立状态及面板回读依据")] {
-            let field = NSTextField(string: ""); field.placeholderString = title + "（填写证据引用与结论）"; field.setAccessibilityLabel(title); haDriverEvidence[key] = field; adapter.addArrangedSubview(field); field.widthAnchor.constraint(equalTo: adapter.widthAnchor).isActive = true
+            let field = NSTextField(string: ""); field.placeholderString = title + "（填写证据引用与结论）"; field.setAccessibilityLabel(title); haDriverEvidence[key] = field; developer.addArrangedSubview(field); field.widthAnchor.constraint(equalTo: developer.widthAnchor).isActive = true
         }
-        adapter.addArrangedSubview(button("选择已核对驱动并自动生成清单…", #selector(importHADriver)))
-        adapter.addArrangedSubview(button("高级：导入已有清单和驱动…", #selector(importHAAdapter)))
-        adapter.addArrangedSubview(button("在Finder查看向导文件", #selector(revealHAWizard)))
+        developer.addArrangedSubview(button("选择已核对驱动并自动生成清单…", #selector(importHADriver)))
+        developer.isHidden = true; haDeveloperTools = developer; adapter.addArrangedSubview(developer); developer.widthAnchor.constraint(equalTo: adapter.widthAnchor).isActive = true
         haEntityID.placeholderString = "HA实际创建的light实体ID，例如light.study_ceiling"; haEntityID.setAccessibilityLabel("HA灯实体ID")
         haInstallNotes.placeholderString = "记录HA版本、配置结果及只启用此单灯的依据"; haInstallNotes.setAccessibilityLabel("HA安装记录")
         let install = stack([label("第三步：安装并配置HA", 16, .semibold), button("生成单灯HA安装包", #selector(buildHABundle)), button("在Finder查看安装包", #selector(revealHAWizard)), label("完整解压安装包，通过已有文件管理工具，把custom_components/mc7021_single_light复制到HA配置目录。先备份HA，已有同名集成时停止，勿直接覆盖。然后在HA界面重启，在设置→设备与服务→添加集成中搜索“MC7021 单灯业主验收”。核对绑定主机和对象，明确确认驱动及现场单灯测试后，HA才加载驱动。无需猜测未知端口或寄存器。", 13), haEntityID, haInstallNotes, button("记录已在HA安装并配置", #selector(recordHAInstallation)), label("Mac不替你登录、安装、启用或更改HA。安装成功是人工声明；后续须导回同一安装包的HA诊断和实际亮灭观察。", 12)])
@@ -334,12 +337,32 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         changeHAStep(); changeHACase(); return scroll
     }
 
+    @objc private func toggleHADeveloperTools(_ sender: NSButton) { haDeveloperTools?.isHidden = sender.state != .on }
+
+    @objc private func selfServiceReadiness() {
+        guard !busy else { return }
+        let titles = ["我能确认本户MC7021和同一组普通灯，原App及面板本来正常", "我能从已有记录取得主机IP，并从Finder复制iPhone UDID；不猜、不扫描", "我会解压、保存和导入本地文件，知道抓包和完整报告不能公开", "我已有可用HA，会备份、用现有文件管理器复制集成、重启和添加集成", "我能分别记录实物亮灭与HA显示，并按提示完成面板、断线和重连测试"]
+        let checks = titles.map { NSButton(checkboxWithTitle: $0, target: nil, action: nil) }
+        let form = NSStackView(views: checks); form.orientation = .vertical; form.alignment = .leading; form.spacing = 10
+        form.frame = NSRect(x: 0, y: 0, width: 660, height: 155)
+        let dialog = NSAlert(); dialog.messageText = "自助前检查 · 基础知识与操作准备"
+        dialog.informativeText = "这只是你的准备声明，不验证网络、协议或驱动，也不授权连接。无须会Python或报文逆向；未知驱动不会因为勾选就可用。"
+        dialog.accessoryView = form; dialog.addButton(withTitle: "查看准备情况"); dialog.addButton(withTitle: "暂不继续")
+        guard dialog.runModal() == .alertFirstButtonReturn else { return }
+        let missing = zip(titles, checks).filter { $0.1.state != .on }.map { $0.0 }
+        if missing.isEmpty {
+            alert("五项准备声明已记录在本次检查", "你具备自助操作的基础准备，仍需真实首组复核和匹配驱动。当前项目尚无实机验证的摩根驱动。此检查不保存为协议证据、不解锁或启动连接。按正常按钮另行开始采样/导入，遇错误保持待验证。")
+        } else {
+            alert("先补齐这些基础条件", missing.joined(separator: "\n") + "\n\n缺工具、未知IP、原App异常、HA无文件管理条件时先停在该步。没有匹配驱动或实物状态不符时，不靠勾选继续，不扩其他灯。")
+        }
+    }
+
     @objc private func changeHAStep() { for (index, view) in haStepViews.enumerated() { view.isHidden = index != haStepPicker.indexOfSelectedItem } }
     private func selectedHAWizard() -> URL? {
-        guard !busy, let file = wizardFile else { alert("先新建或载入向导", "可以先演示，正式接入需要有效首组复核及自行核对的驱动。"); return nil }; return file
+        guard !busy, let file = wizardFile else { alert("先新建或载入向导", "可以先演示，正式接入需要有效首组复核及匹配的可信驱动。"); return nil }; return file
     }
     @objc private func createHAWizard() {
-        guard !busy, activeReviewPassed, let review = activeReviewFile else { alert("先完成首组复核", "没有有效真实首组记录时，可先演示HA向导。"); return }
+        guard !busy, activeReviewPassed, let review = activeReviewFile else { alert("先完成首组复核", "先完成真实首组并保留原件；不确定的协议项目保持待验证，不盲目勾选。可先演示或查看自助前检查。"); return }
         var arguments = ["--review-file", review.path]; let ip = host.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         if !ip.isEmpty { arguments += ["--host-ip", ip] }; start(mode: "ha-wizard-create", arguments: arguments)
     }
@@ -362,9 +385,9 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     @objc private func importHAAdapter() {
         guard let file = selectedHAWizard() else { return }
-        let manifest = NSOpenPanel(); manifest.title = "选择已填写的驱动清单JSON"; manifest.allowedFileTypes = ["json"]; manifest.allowsMultipleSelection = false
+        let manifest = NSOpenPanel(); manifest.title = "选择可信材料中已填写完整的驱动清单JSON"; manifest.allowedFileTypes = ["json"]; manifest.allowsMultipleSelection = false
         guard manifest.runModal() == .OK, let m = manifest.url else { return }
-        let driver = NSOpenPanel(); driver.title = "选择已自行审阅的driver.py（Mac不会执行）"; driver.allowedFileTypes = ["py"]; driver.allowsMultipleSelection = false
+        let driver = NSOpenPanel(); driver.title = "选择可信材料中配套的driver.py（只选择文件，不编辑或执行）"; driver.allowedFileTypes = ["py"]; driver.allowsMultipleSelection = false
         guard driver.runModal() == .OK, let d = driver.url else { return }
         start(mode: "ha-wizard-adapter", arguments: ["--wizard-file", file.path, "--manifest-file", m.path, "--driver-file", d.path])
     }

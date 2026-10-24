@@ -47,7 +47,7 @@ TEMPLATE_FILES = ('__init__.py', 'manifest.json', 'config_flow.py', 'const.py',
                   'diagnostics.py', 'strings.json', 'translations/en.json',
                   'translations/zh-Hans.json')
 SCOPE = ('本机流程只核对不变材料和人工声明；不认证复核人、驱动作者或住宅身份，'
-         '不证明机器已验证物理灯亮灭。安装包执行业主自行审阅的驱动；'
+         '不证明机器已验证物理灯亮灭。安装包执行业主确认可信来源及版本说明的驱动；'
          '仅限绑定主机及一组普通灯，不能扩大成全屋或其它设备。')
 
 
@@ -334,7 +334,7 @@ def assess(state, diagnostics=None):
     if state.get('driver'):
         confirmed.append('已静态核对驱动源码API、声明证据和SHA256；源码未在Mac执行，未认证作者或协议正确性。')
     else:
-        pending.append('有能力的业主先按模板补齐本户驱动及协议/会话/独立状态依据；未知参数不得猜填。')
+        pending.append('尚缺本户匹配的真实驱动及完整证据清单；普通自助应导入可信材料。协议开发在高级路径处理，未知参数不得猜填。')
     if state.get('bundle'):
         confirmed.append('固定组件模板、私有驱动和单灯绑定已打包并核对SHA256；尚须在HA界面安装配置。')
     installation = state.get('installation')
@@ -643,7 +643,7 @@ def build_bundle(wizard_file, data_root):
         '3. 记录生成的light实体ID，返回Mac填写安装声明。\n'
         '4. 在HA设备页面按八步选择验收步骤并开始记录。每次观察实际灯与HA显示；断开只断本适配连接，在断开期间用面板开灯，然后重连读回。\n'
         '5. 下载HA集成诊断，私下回Mac导入，逐项选事件和写现场依据；失败保留日志，不用ACK或缓存替代状态。\n'
-        '此包包含业主自行提供的可执行驱动。静态API/SHA校验不认证作者、不证明代码安全或控制正确。\n'
+        '此包包含操作者选择并确认来源的可执行驱动。静态API/SHA校验不认证作者、不证明代码安全或控制正确。\n'
         'HA安装后只有明确添加集成并确认时才连接固定主机；Mac打包不连接设备、不修改HA。\n').encode('utf-8')
     stream = io.BytesIO()
     with zipfile.ZipFile(stream, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
