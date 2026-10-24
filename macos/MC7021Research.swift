@@ -57,6 +57,17 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var samplingTaskText: NSTextView?
     private var samplingPrepareButton: NSButton?
     private let samplingFocus = NSTextField(wrappingLabelWithString: "")
+    private var sessionWorkbenchSession: URL?
+    private var sessionWorkbenchComparison: URL?
+    private var sessionWorkbenchDirectory: URL?
+    private var sessionWorkbenchIdentifier = ""
+    private var sessionWorkbenchAnalyzedIdentifier = ""
+    private var sessionWorkbenchReport = ""
+    private var sessionWorkbenchTasks: [[String: Any]] = []
+    private var sessionWorkbenchWindow: NSWindow?
+    private var sessionWorkbenchPicker: NSPopUpButton?
+    private var sessionWorkbenchText: NSTextView?
+    private let sessionWorkbenchTarget = NSPopUpButton(frame: .zero, pullsDown: false)
     private var haDriverEvidence: [String: NSTextField] = [:]
     private let haStepPicker = NSPopUpButton(frame: .zero, pullsDown: false)
     private var haStepViews: [NSView] = []
@@ -113,7 +124,7 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
            FileManager.default.fileExists(atPath: path) { dataDirectory = URL(fileURLWithPath: path, isDirectory: true) }
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1040, height: 800),
                           styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
-        window.title = "MC7021 研究工具 · v0.8.0"
+        window.title = "MC7021 研究工具 · v0.9.0"
         window.minSize = NSSize(width: 920, height: 740)
         window.delegate = self
         let content = window.contentView!
@@ -218,6 +229,7 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             label("生成明确标为合成的通信和操作记录，自动完成离线分析，并在应用内查看中文报告。\n不用手机、不填 IP / UDID、不提权，不接触家庭设备。"),
             button("生成演示报告", #selector(startDemo)),
             button("多轮合成演示与汇总", #selector(startCollectionDemo)),
+            button("演示会话策略工作台", #selector(demoSessionWorkbench)),
             label("演示证明软件流程，不能验证任何住宅，也不是可安装的 Home Assistant 集成。", 12)])
         return topAligned(result)
     }
@@ -250,6 +262,8 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             button("选择采样文件夹并分析…", #selector(startAnalysis)),
             button("汇总本机多轮采样", #selector(startCollection)),
             button("查看缺口与补采向导", #selector(refreshSamplingGaps)),
+            button("本机会话策略工作台…", #selector(analyzeSessionWorkbench)),
+            button("演示会话策略分析", #selector(demoSessionWorkbench)),
             label("汇总当前数据文件夹的captures目录，每一轮独立分析。旧样本无灯名时显示未知；相同报文标识只提示冲突，不自动合并为同一灯。", 12),
             label("报告会检查完整性、关联操作时间线，并区分开关请求、执行应答、ACK 和状态候选。不能识别或证据不足时保留未知。", 13)]))
     }
@@ -339,6 +353,8 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         adapter.addArrangedSubview(button("选择第二轮样本作离线对照…", #selector(compareLocalRecipe)))
         adapter.addArrangedSubview(button("在Finder查看私有适配档案", #selector(revealLocalAdaptation)))
         adapter.addArrangedSubview(button("缺口与补采向导", #selector(refreshSamplingGaps)))
+        adapter.addArrangedSubview(button("继续分析认证、会话、序号与重连…", #selector(analyzeSessionWorkbench)))
+        adapter.addArrangedSubview(button("演示会话策略工作台", #selector(demoSessionWorkbench)))
         let developerToggle = NSButton(checkboxWithTitle: "显示协议开发者工具（普通业主无需）", target: self, action: #selector(toggleHADeveloperTools(_:)))
         developerToggle.setAccessibilityLabel("显示协议开发者工具"); adapter.addArrangedSubview(developerToggle)
         let developer = stack([label("高级开发：仅供协议分析和驱动实现者", 15, .semibold), label("此路径需要会话/认证、命令编码和独立状态的真实证据。模板没有实现摩根协议，不能用勾选代替未知参数。导入源码不在Mac执行；HA启用后具有自定义集成的代码执行权限。", 12), button("导出驱动接口模板", #selector(exportHAStarter))])
@@ -457,7 +473,7 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let text = NSTextView(); text.font = .systemFont(ofSize: 13); text.string = samplingPlanText
         let scroll = scrollText(text); scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 420).isActive = true
         let prepare = button("准备同组补采（不启动）", #selector(prepareSamplingTask)); prepare.isEnabled = false
-        let actions = NSStackView(views: [button("重新检查原件与缺口", #selector(refreshSamplingGaps)), prepare]); actions.spacing = 10
+        let actions = NSStackView(views: [button("重新检查原件与缺口", #selector(refreshSamplingGaps)), prepare, button("继续分析会话策略", #selector(analyzeSamplingSessionWorkbench))]); actions.spacing = 10
         let body = stack([label("缺什么、为何缺、怎样正常补采", 20, .semibold), label("仅在本机重新检查原件，无需填写密码或令牌。‘已观察到’不代表协议已验证；人工事实和软件未支持的策略不能靠多采或勾选通过。补采准备不会启动接口或家庭通信。", 13), picker, scroll, actions])
         body.translatesAutoresizingMaskIntoConstraints = false; content.addSubview(body)
         NSLayoutConstraint.activate([body.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 20), body.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -20), body.topAnchor.constraint(equalTo: content.topAnchor, constant: 20), body.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -20), picker.widthAnchor.constraint(equalTo: body.widthAnchor), scroll.widthAnchor.constraint(equalTo: body.widthAnchor)])
@@ -503,6 +519,116 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         samplingFocus.stringValue = "本轮补采重点：" + (event["task_title"] as? String ?? "补齐同组证据") + "\n" + ((event["instructions"] as? [String]) ?? []).joined(separator: "\n") + "\n本轮仍完成同组正常App与面板步骤。确认现场并本人点“开始本轮采样”后才进入原采样流程。"
         tabs.selectedSegment = 1; changePage(); samplingPlanWindow?.close()
         lastReviewMessage = "只填写采样准备，未启动采样、RVI或家庭通信。"; status.stringValue = lastReviewMessage!
+    }
+
+    @objc private func analyzeSessionWorkbench() {
+        guard !busy, let root = requireDataDirectory() else { return }
+        let panel = NSOpenPanel(); panel.title = "选择本户首组普通灯的完整采样"
+        panel.message = "仅本机分析认证形状、会话时序、序号候选和正常重进App回读。选择数据目录内包含三个原件的文件夹，不上传、不输入凭据、不连接设备。"; panel.directoryURL = root
+        panel.canChooseFiles = false; panel.canChooseDirectories = true; panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let selected = panel.url else { return }
+        start(mode: "session-workbench", arguments: ["--session-dir", selected.path])
+    }
+    @objc private func demoSessionWorkbench() {
+        guard !busy else { return }; start(mode: "session-workbench-demo", arguments: [])
+    }
+    @objc private func analyzeSamplingSessionWorkbench() {
+        guard !busy, let session = samplingPlanSession else { return }
+        var arguments = ["--session-dir", session.path]
+        if !samplingPlanIdentifier.isEmpty { arguments += ["--identifier", samplingPlanIdentifier] }
+        if let comparison = samplingPlanComparison { arguments += ["--comparison-dir", comparison.path] }
+        samplingPlanWindow?.close(); start(mode: "session-workbench", arguments: arguments)
+    }
+    @objc private func refreshSessionWorkbench() {
+        guard !busy, let session = sessionWorkbenchSession else { return }
+        var arguments = ["--session-dir", session.path]
+        if !sessionWorkbenchIdentifier.isEmpty { arguments += ["--identifier", sessionWorkbenchIdentifier] }
+        if let comparison = sessionWorkbenchComparison { arguments += ["--comparison-dir", comparison.path] }
+        start(mode: "session-workbench", arguments: arguments)
+    }
+    @objc private func compareSessionWorkbench() {
+        guard !busy, let session = sessionWorkbenchSession, let root = requireDataDirectory() else { return }
+        guard !sessionWorkbenchIdentifier.isEmpty else { alert("先核对本组完整对象", "请从本机报文候选下拉列表选择实际对应这组普通灯的完整标识，再点重算；不按灯名或第一项猜选。"); return }
+        let panel = NSOpenPanel(); panel.title = "加入同户同灯的独立第二轮"
+        panel.message = "选择不同PCAP的完整新一轮原件。工具重算两轮，保留反例与未知；复制同一轮不能作为留出验证。两轮一致也不解锁在线驱动。"; panel.directoryURL = root
+        panel.canChooseFiles = false; panel.canChooseDirectories = true; panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let selected = panel.url else { return }
+        var arguments = ["--session-dir", session.path, "--comparison-dir", selected.path]
+        if !sessionWorkbenchIdentifier.isEmpty { arguments += ["--identifier", sessionWorkbenchIdentifier] }
+        start(mode: "session-workbench", arguments: arguments)
+    }
+    @objc private func sessionWorkbenchGaps() {
+        guard !busy, let session = sessionWorkbenchSession else { return }
+        var arguments = ["--session-dir", session.path]
+        if !sessionWorkbenchIdentifier.isEmpty { arguments += ["--identifier", sessionWorkbenchIdentifier] }
+        if let comparison = sessionWorkbenchComparison { arguments += ["--comparison-dir", comparison.path] }
+        sessionWorkbenchWindow?.close(); start(mode: "sampling-plan", arguments: arguments)
+    }
+    @objc private func revealSessionWorkbench() {
+        if let directory = sessionWorkbenchDirectory { NSWorkspace.shared.activateFileViewerSelecting([directory]) }
+    }
+    @objc private func sessionWorkbenchHAConditions() {
+        alert("候选策略仍须实现与验证", "本工作台不生成联网驱动、不复制旧认证报文或固定序号。未知加密、动态密钥、合法新凭据和会话生命周期可能仍需软件支持。只有已有完整且匹配的实现、首组核对通过后，才使用HA向导导入并明确启用同一灯；再做四次HA开关、面板反馈、断线不可用和新连接当前读回八项验收。离线一致不能自动填写通过。")
+    }
+    private func receiveSessionWorkbench(_ event: [String: Any]) {
+        guard event["online_ready"] as? Bool == false, event["driver_generated"] as? Bool == false,
+              let path = event["session_dir"] as? String else { return }
+        sessionWorkbenchSession = URL(fileURLWithPath: path, isDirectory: true)
+        sessionWorkbenchComparison = (event["comparison_dir"] as? String).map { URL(fileURLWithPath: $0, isDirectory: true) }
+        sessionWorkbenchDirectory = (event["directory"] as? String).map { URL(fileURLWithPath: $0, isDirectory: true) }
+        sessionWorkbenchIdentifier = event["selected_identifier"] as? String ?? ""
+        sessionWorkbenchAnalyzedIdentifier = sessionWorkbenchIdentifier
+        sessionWorkbenchReport = event["report_text"] as? String ?? "缺少完整结果；不能确认协议充分或驱动就绪。"
+        sessionWorkbenchTarget.removeAllItems(); sessionWorkbenchTarget.addItem(withTitle: "请选择实际对应本组灯的完整候选；不自动选首项")
+        for identifier in event["candidates"] as? [String] ?? [] {
+            guard identifier.range(of: "^[0-9a-f]{16}$", options: .regularExpression) != nil else { continue }
+            sessionWorkbenchTarget.addItem(withTitle: identifier); sessionWorkbenchTarget.lastItem?.representedObject = identifier
+            if identifier == sessionWorkbenchIdentifier { sessionWorkbenchTarget.select(sessionWorkbenchTarget.lastItem) }
+        }
+        if !sessionWorkbenchIdentifier.isEmpty, sessionWorkbenchTarget.selectedItem?.representedObject as? String != sessionWorkbenchIdentifier {
+            sessionWorkbenchTarget.addItem(withTitle: sessionWorkbenchIdentifier); sessionWorkbenchTarget.lastItem?.representedObject = sessionWorkbenchIdentifier; sessionWorkbenchTarget.select(sessionWorkbenchTarget.lastItem)
+        }
+        if event["candidate_list_truncated"] as? Bool == true { sessionWorkbenchReport += "\n界面候选超过256项上限，完整列表保存在本机JSON；不自动猜选首项。" }
+        sessionWorkbenchTasks = event["tasks"] as? [[String: Any]] ?? []
+        showSessionWorkbenchWindow()
+        lastReviewMessage = "本机会话候选及反例已保存；未上传、未连接家庭设备、未生成联网驱动。"
+    }
+    private func showSessionWorkbenchWindow() {
+        sessionWorkbenchWindow?.close()
+        let panel = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1040, height: 850), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        panel.title = "本机会话策略工作台 · 候选、反例与下一步"; panel.isReleasedWhenClosed = false
+        let content = NSView(); panel.contentView = content
+        let picker = NSPopUpButton(frame: .zero, pullsDown: false); picker.setAccessibilityLabel("会话策略任务")
+        picker.addItem(withTitle: "查看全部会话证据与候选策略")
+        for task in sessionWorkbenchTasks {
+            picker.addItem(withTitle: task["title"] as? String ?? "待验证项目"); picker.lastItem?.representedObject = task["id"] as? String
+        }
+        picker.target = self; picker.action = #selector(changeSessionWorkbenchTask)
+        sessionWorkbenchTarget.target = self; sessionWorkbenchTarget.action = #selector(changeSessionWorkbenchTarget); sessionWorkbenchTarget.setAccessibilityLabel("会话工作台完整对象")
+        let text = NSTextView(); text.font = .systemFont(ofSize: 13); text.string = sessionWorkbenchReport
+        let scroll = scrollText(text); scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 360).isActive = true
+        let actions = NSStackView(views: [button("重算候选与离线验证", #selector(refreshSessionWorkbench)), button("加入独立第二轮…", #selector(compareSessionWorkbench)), button("打开同组补采向导", #selector(sessionWorkbenchGaps))]); actions.spacing = 10
+        let next = NSStackView(views: [button("在Finder查看私有会话档案", #selector(revealSessionWorkbench)), button("查看HA接入条件", #selector(sessionWorkbenchHAConditions))]); next.spacing = 10
+        let body = stack([label("认证、会话、序号与重连：继续在本机研究", 20, .semibold), label("固定分析器重读本机原件，比较不同连接和独立第二轮。认证字段仅显示形状及变化，不显示凭据；不复制旧会话，不执行候选策略。反例和未知不会被勾选消除，仍需匹配实现和现场验收。", 13), label("完整对象仅用于离线候选；选择后点重算，实物对应仍须本人确认。", 12), sessionWorkbenchTarget, picker, scroll, actions, next])
+        body.translatesAutoresizingMaskIntoConstraints = false; content.addSubview(body)
+        NSLayoutConstraint.activate([body.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 20), body.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -20), body.topAnchor.constraint(equalTo: content.topAnchor, constant: 20), body.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -20), sessionWorkbenchTarget.widthAnchor.constraint(equalTo: body.widthAnchor), picker.widthAnchor.constraint(equalTo: body.widthAnchor), scroll.widthAnchor.constraint(equalTo: body.widthAnchor)])
+        sessionWorkbenchPicker = picker; sessionWorkbenchText = text; sessionWorkbenchWindow = panel
+        panel.center(); panel.makeKeyAndOrderFront(nil)
+    }
+    @objc private func changeSessionWorkbenchTask() {
+        if let id = sessionWorkbenchPicker?.selectedItem?.representedObject as? String,
+           let task = sessionWorkbenchTasks.first(where: { $0["id"] as? String == id }) {
+            sessionWorkbenchText?.string = task["ui_text"] as? String ?? "请查看同目录会话适配说明和完整JSON；当前任务仍待验证。"
+        } else { sessionWorkbenchText?.string = sessionWorkbenchReport }
+        if sessionWorkbenchIdentifier != sessionWorkbenchAnalyzedIdentifier {
+            sessionWorkbenchText?.string = "新选择尚未重算。以下仍是原分析对象的证据；请先点重算，不能沿用为新对象结论。\n\n" + (sessionWorkbenchText?.string ?? "")
+        }
+        sessionWorkbenchText?.scrollToBeginningOfDocument(nil)
+    }
+    @objc private func changeSessionWorkbenchTarget() {
+        sessionWorkbenchIdentifier = sessionWorkbenchTarget.selectedItem?.representedObject as? String ?? ""
+        sessionWorkbenchText?.string = "对象选择尚未重算。请核对实际灯路后点“重算候选与离线验证”；选择不代表身份、协议或HA通过。\n\n" + sessionWorkbenchReport
+        sessionWorkbenchText?.scrollToBeginningOfDocument(nil)
     }
 
     @objc private func selfServiceReadiness() {
@@ -832,6 +958,7 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             wizardFile = nil; wizardState = [:]; for field in haDriverEvidence.values { field.stringValue = "" }; haEntityID.stringValue = ""; haInstallNotes.stringValue = ""; changeHACase()
             adaptationSession = nil; adaptationDirectory = nil; adaptationReport = ""; adaptationTarget.removeAllItems(); adaptationTarget.addItem(withTitle: "先分析，再选择本组完整对象标识")
             samplingPlanSession = nil; samplingPlanFile = nil; samplingPlanComparison = nil; samplingPlanIdentifier = ""; samplingPlanTasks = []; samplingPlanText = ""; samplingPlanSimulation = true; samplingPlanWindow?.close(); samplingFocus.stringValue = ""
+            sessionWorkbenchSession = nil; sessionWorkbenchComparison = nil; sessionWorkbenchDirectory = nil; sessionWorkbenchIdentifier = ""; sessionWorkbenchAnalyzedIdentifier = ""; sessionWorkbenchReport = ""; sessionWorkbenchTasks = []; sessionWorkbenchWindow?.close()
             handoffDirectory = nil; haStatus.stringValue = "数据目录已更换，请载入本目录中有效的首组核对记录。"
             reviewCandidate.removeAllItems(); reviewCandidate.addItem(withTitle: "等待当前目录的重复开关候选")
             for key in reviewIDs { reviewEvidence[key]?.stringValue = "等待当前数据目录的本轮检查。" }
@@ -1041,6 +1168,8 @@ final class ResearchApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             receiveSamplingPlan(event)
         case "sampling_preparation":
             receiveSamplingPreparation(event)
+        case "session_workbench":
+            receiveSessionWorkbench(event)
         case "ha_handoff":
             if let path = event["directory"] as? String {
                 handoffDirectory = URL(fileURLWithPath: path, isDirectory: true)

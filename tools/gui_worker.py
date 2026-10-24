@@ -217,6 +217,11 @@ def make_parser():
     adaptation = modes.add_parser('local-adapt')
     adaptation.add_argument('--session-dir', required=True, type=Path)
     modes.add_parser('local-adapt-demo')
+    workbench = modes.add_parser('session-workbench')
+    workbench.add_argument('--session-dir', required=True, type=Path)
+    workbench.add_argument('--identifier', default='')
+    workbench.add_argument('--comparison-dir', type=Path)
+    modes.add_parser('session-workbench-demo')
     recipe = modes.add_parser('local-recipe')
     recipe.add_argument('--session-dir', required=True, type=Path)
     recipe.add_argument('--identifier', required=True)
@@ -438,6 +443,51 @@ def emit_sampling_plan(protocol, directory, root, identifier='', comparison=None
         simulation=record['simulation'], online_ready=False)
 
 
+def run_session_workbench(args, protocol):
+    """Analyze bounded local session candidates; never import or run a driver."""
+    try:
+        from . import session_workbench as workbench
+    except ImportError:
+        import session_workbench as workbench
+    protocol.emit('step', title='本机会话策略工作台',
+        instruction='重新读取本机原件，对照会话、认证、序号和重连候选；不联网、不上传、不生成可用驱动。')
+    if args.mode == 'session-workbench-demo':
+        directory, comparison = workbench.create_demo(args.data_dir)
+        identifier = ''
+    else:
+        directory, comparison, identifier = args.session_dir, args.comparison_dir, args.identifier
+    path, record = workbench.create_workbench(directory, args.data_dir,
+        selected_identifier=identifier, comparison_directory=comparison)
+    # Keep the native JSON line bounded. Full evidence remains in the private
+    # artifact; UI task text is a fixed projection, never arbitrary TLV values.
+    tasks = []
+    text_budget = 180000
+    for task in record['tasks'][:32]:
+        value = str(workbench.render_task_text(record, task['id']))
+        limit = min(20000, text_budget)
+        text_budget -= min(len(value), limit)
+        if len(value) > limit:
+            value = value[:limit] + '\n界面任务内容达到上限；请在Finder查看完整本机档案，不能把截断视为通过。'
+        tasks.append(dict(id=task['id'], title=str(task.get('title', '待验证项目'))[:500],
+            category=str(task.get('category', 'software_support'))[:80],
+            status=str(task.get('status', 'software_required'))[:80],
+            capture_allowed=False, ui_text=value))
+    report_text = bounded_local_text(workbench.render_text(record))
+    if len(record['tasks']) > len(tasks):
+        report_text += '\n界面任务列表达到32项上限；请在Finder查看完整本机档案，不自动忽略其余缺口。'
+    holdout = record.get('holdout')
+    comparison_path = (args.data_dir / holdout['source_paths']['session_dir']
+                       if isinstance(holdout, dict) else None)
+    protocol.emit('session_workbench', json_file=str(path), directory=str(Path(path).parent),
+        session_dir=str(args.data_dir / record['primary']['source_paths']['session_dir']),
+        comparison_dir=str(comparison_path) if comparison_path is not None else None,
+        selected_identifier=record.get('selected_identifier') or '',
+        candidates=record.get('candidate_identifiers', [])[:256],
+        candidate_list_truncated=len(record.get('candidate_identifiers', [])) > 256,
+        report_text=report_text, tasks=tasks, simulation=record['simulation'],
+        online_ready=False, driver_generated=False)
+
+
 def capture_input_names():
     return ('session.json', 'events.jsonl', 'traffic.pcap')
 
@@ -642,6 +692,9 @@ def run(argv=None, protocol=None, backend_factory=None):
                     ok = True
                 elif args.mode in ('local-adapt', 'local-adapt-demo', 'local-recipe'):
                     run_local_adaptation(args, protocol)
+                    ok = True
+                elif args.mode in ('session-workbench', 'session-workbench-demo'):
+                    run_session_workbench(args, protocol)
                     ok = True
                 elif args.mode in ('sampling-plan', 'sampling-prepare'):
                     emit_sampling_plan(protocol, args.session_dir, args.data_dir,

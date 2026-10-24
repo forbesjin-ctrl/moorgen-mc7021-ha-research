@@ -214,7 +214,8 @@ def _build_tasks(first, second, identifier, simulation, target_context):
         ('本机逐项人工核对声明；之后仍需HA现场验收。',), refs_for('case_checks'))
     add('authentication_strategy', '认证、会话及序号策略尚缺实现', 'software_support', 'software_required',
         '当前工具没有经过本户验证的认证、会话建立/过期、序号与重连策略。字段存在不证明成功，字段缺失不证明免认证。',
-        ('原件只留本机；等待相应公开工具策略实现及验证，或由业主在自己的环境研究。',
+        ('在本窗口点“继续分析会话策略”，工具会从本机原件比较认证形状、会话顺序、序号候选和新连接回读；可加入独立第二轮，不需要写Python或上传。',
+         '候选获支持仍不是完整实现；动态密钥、新凭据、未支持封装及会话生命周期可能仍需匹配软件策略。',
          '不要复制认证字段、猜填令牌、重放旧连接或用重复补采替代策略实现。'),
         ('匹配本户且经过验证的会话、认证、序号和重连实现及独立读回证据。',),
         refs_for('auth_field_shapes'), 'unsupported')

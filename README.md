@@ -4,6 +4,8 @@
 
 **本地自助优先：业主资料不必经过本项目人员。** 原始抓包、完整报告、复核、适配配方和HA诊断默认留在业主自己的电脑及HA环境，不要求回传，不集中收样。Mac工具无自动上传。普通业主不需要写Python：有适配驱动时按图形引导安装和验收；没有驱动时，可在本机图形工作台重算真实报文、选择对象、生成固定codec配方并作两轮离线对照。工具不承诺自动实现未知登录协议。需要求助时先自愿分享匿名版本/现象和最少摘要，原始文件仅作为另行同意的协助选项。
 
+v0.9.0增加[本机会话策略工作台](docs/SESSION_WORKBENCH.md)。在缺口窗口点“继续分析会话策略”，或从“分析”选择本机原件；工具重算双向连接与认证时序、字段形状及跨连接变化、全局递增/恒定/响应回显等窄序号候选，并用不同连接或独立第二轮检验反例。正常重进App需新连接、新详情请求和独立状态候选，不能用旧缓存或ACK代替。资料只留本机，不写Python；结果是不可执行候选，不会生成未知认证、加密策略或联网驱动。动态密钥与合法新凭据不能靠被动报文保证获得，实际HA仍需匹配实现及现场验收。
+
 v0.8.0增加[缺口与补采向导](docs/SAMPLING_GAPS.md)。采样结束清理后或重新分析本机原件时，工具自动整理结构化缺口，再按任务说明为何缺、证据在哪里、怎样正常补采和预期看到什么；需要人工核对或软件尚未支持的策略单独列出。准备补采只填同组采样表单并清空现场确认，不启动采样或网络，也不解锁其他灯或HA。更多同类报文不能保证解决未知认证或加密。
 
 此前v0.7.0的[本机适配工作台](docs/LOCAL_ADAPTATION.md)提供无现成驱动路线：不要求首组已通过即可离线研究，从PCAP重算会话、候选和认证缺口，选择完整对象，生成私有JSON编解码配方，再用不同PCAP作第二轮离线对照。它不输出可执行驱动，`online_ready`保持`false`；离线codec一致不代表驱动完成。已有五步HA图形向导和“自助前检查”保留，具备电脑和HA基础的业主，有经过验证且匹配的完整驱动时才可能自助接通，详见[五项基础能力与三个停止条件](docs/SELF_SERVICE.md)。当前真实住户样本、已验证摩根驱动和真实HA单灯验收均为0；Intel/macOS12真机、完整HA部署和真实灯控未验证。
@@ -12,7 +14,7 @@ v0.8.0增加[缺口与补采向导](docs/SAMPLING_GAPS.md)。采样结束清理�
 
 ## 业主怎样参加
 
-从[v0.8.0 Mac图形预览版](https://github.com/forbesjin-ctrl/moorgen-mc7021-ha-research/releases/tag/v0.8.0)下载`MC7021-Mac-v0.8.0-universal2.zip`，完整解压后双击`MC7021 单灯研究工具.app`。历史[v0.7.0预览版](https://github.com/forbesjin-ctrl/moorgen-mc7021-ha-research/releases/tag/v0.7.0)保留本机适配工作台，不含结构化补采向导。已发布的[v0.6.2预览版](https://github.com/forbesjin-ctrl/moorgen-mc7021-ha-research/releases/tag/v0.6.2)作为历史版本保留，不含本机适配工作台。
+从[v0.9.0 Mac图形预览版](https://github.com/forbesjin-ctrl/moorgen-mc7021-ha-research/releases/tag/v0.9.0)下载`MC7021-Mac-v0.9.0-universal2.zip`，完整解压后双击`MC7021 单灯研究工具.app`。历史[v0.7.0预览版](https://github.com/forbesjin-ctrl/moorgen-mc7021-ha-research/releases/tag/v0.7.0)保留本机适配工作台，不含结构化补采向导。已发布的[v0.6.2预览版](https://github.com/forbesjin-ctrl/moorgen-mc7021-ha-research/releases/tag/v0.6.2)作为历史版本保留，不含本机适配工作台。
 
 应用每轮仍只操作一组灯。首次选择本机数据文件夹，然后在窗口选择演示、采样、分析、报告、首组核对或HA接入。不用安装Python，不用打开终端；真实采样仍需已有Apple USB抓包组件rvictl，缺少时不自动安装。报告直接用原生窗口展示，不启动网页服务器。[图形版使用说明](docs/MAC_GUI.md)包含现场要求和首次打开说明。
 
